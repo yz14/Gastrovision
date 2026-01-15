@@ -90,7 +90,8 @@ def run_ssl_pretrain(args):
     backbone = get_model(
         args.model, 
         num_classes=1000,  # 占位，会被 SSL 方法移除
-        pretrained=args.pretrained)
+        pretrained=args.pretrained,
+        weights_path=args.weights_path)
     
     # 创建 SSL 模型
     ssl_model = _get_ssl_model(args, backbone)
@@ -232,11 +233,51 @@ def get_model(
     model_fn, weights_enum, head_type = model_configs[model_name]
     
     # 创建模型
-    if pretrained:
+    # 权重加载优先级: weights_path > torch cache > pretrained (网络下载)
+    if weights_path and os.path.isfile(weights_path):
+        # 使用本地权重文件
+        model = model_fn(weights=None)
+        print(f"  加载本地权重: {weights_path}")
+        state_dict = torch.load(weights_path, map_location='cpu', weights_only=False)
+        model.load_state_dict(state_dict, strict=False)
+    elif weights_path:
+        # weights_path 指定但文件不存在，检查 torch cache
+        print(f"  警告: 指定的权重文件不存在: {weights_path}")
+        cache_dir = os.path.expanduser('~/.cache/torch/hub/checkpoints')
+        # 尝试从文件名推断 cache 文件
+        expected_cache = {
+            'resnet50': 'resnet50-11ad3fa6.pth',
+            'resnet18': 'resnet18-f37072fd.pth',
+            'convnext_tiny': 'convnext_tiny-983f1562.pth',
+            'convnext_base': 'convnext_base-6075fbad.pth',
+        }
+        cache_file = expected_cache.get(model_name)
+        if cache_file:
+            cache_path = os.path.join(cache_dir, cache_file)
+            if os.path.isfile(cache_path):
+                print(f"  从 torch cache 加载: {cache_path}")
+                model = model_fn(weights=None)
+                state_dict = torch.load(cache_path, map_location='cpu', weights_only=False)
+                model.load_state_dict(state_dict, strict=False)
+            elif pretrained:
+                print(f"  从网络下载预训练权重...")
+                model = model_fn(weights=weights_enum)
+            else:
+                model = model_fn(weights=None)
+                print(f"  使用随机初始化权重")
+        elif pretrained:
+            print(f"  从网络下载预训练权重...")
+            model = model_fn(weights=weights_enum)
+        else:
+            model = model_fn(weights=None)
+            print(f"  使用随机初始化权重")
+    elif pretrained:
+        # 从网上下载 ImageNet 预训练权重
         model = model_fn(weights=weights_enum)
         print(f"  加载 ImageNet 预训练权重: {weights_enum}")
     else:
         model = model_fn(weights=None)
+        print(f"  使用随机初始化权重")
     
     # 替换分类头
     in_features = _get_classifier_in_features(model, head_type)
@@ -245,12 +286,6 @@ def get_model(
     # 冻结 backbone
     if freeze_backbone:
         _freeze_backbone(model, head_type)
-    
-    # 加载自定义权重
-    if weights_path and os.path.isfile(weights_path):
-        print(f"  加载自定义权重: {weights_path}")
-        state_dict = torch.load(weights_path, map_location='cpu')
-        model.load_state_dict(state_dict, strict=False)
     
     _print_model_params(model)
     return model
@@ -341,7 +376,7 @@ def get_scheduler(
                          epochs=epochs, steps_per_epoch=steps_per_epoch)
     elif scheduler_name == 'warmup_cosine':
         return WarmupCosineScheduler(optimizer, warmup_epochs=warmup_epochs, 
-                                     max_epochs=epochs, steps_per_epoch=steps_per_epoch)
+                                     total_epochs=epochs)
     elif scheduler_name == 'none':
         return None
     else:
@@ -410,11 +445,11 @@ def main():
     parser = argparse.ArgumentParser(description="Gastrovision 模型训练", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     
     # 模式参数
-    parser.add_argument('--mode', type=str, default='ssl_pretrain', choices=['train', 'ssl_pretrain', 'finetune', 'test'], help='运行模式: train(分类训练), ssl_pretrain(SSL预训练), finetune(微调), test(测试)')
+    parser.add_argument('--mode', type=str, default='train', choices=['train', 'ssl_pretrain', 'finetune', 'test'], help='运行模式: train(分类训练), ssl_pretrain(SSL预训练), finetune(微调), test(测试)')
     
     # SSL 预训练参数
     parser.add_argument('--ssl_method', type=str, default='simsiam', choices=['simsiam', 'moco', 'simclr', 'byol', 'barlow_twins', 'swav', 'dino', 'mae', 'instdisc', 'rotation', 'siamese', 'triplet'], help='SSL 方法')
-    parser.add_argument('--ssl_epochs', type=int, default=100, help='SSL 预训练轮数')
+    parser.add_argument('--ssl_epochs', type=int, default=10, help='SSL 预训练轮数')
     parser.add_argument('--ssl_output_dir', type=str, default='D:/codes/work-projects/Gastrovision_results/simsiam', help='SSL checkpoint 输出目录')
     parser.add_argument('--projector_dim', type=int, default=2048, help='投影头输出维度')
     parser.add_argument('--predictor_dim', type=int, default=512, help='预测头隐藏层维度 (SimSiam/BYOL)')
@@ -422,13 +457,13 @@ def main():
     parser.add_argument('--momentum', type=float, default=0.996, help='动量参数 (MoCo/BYOL/DINO)')
     
     # 数据参数
-    parser.add_argument('--data_dir', type=str, default='D:/codes/work-projects/Gastrovision_model', help='数据目录（包含 train.txt, valid.txt 等）')
-    parser.add_argument('--output_dir', type=str, default='D:/codes/work-projects/Gastrovision_results/convnext_tiny_backbone', help='输出目录')
+    parser.add_argument('--data_dir', type=str, default='D:/codes/work-projects/Gastrovision_models', help='数据目录（包含 train.txt, valid.txt 等）')
+    parser.add_argument('--output_dir', type=str, default='D:/codes/work-projects/Gastrovision_results/convnext_tiny', help='输出目录')
     
     # 模型参数
-    parser.add_argument('--model', type=str, default='resnet50', help='模型名称 (resnet18/34/50/101/152, resnext50/101, wide_resnet50/101, gastronet_resnet50_dino, gastronet_vit_small 等)')
+    parser.add_argument('--model', type=str, default='convnext_tiny', help='模型名称 (resnet18/34/50/101/152, resnext50/101, wide_resnet50/101, gastronet_resnet50_dino, gastronet_vit_small 等)')
     parser.add_argument('--pretrained', action='store_true', default=True, help='使用 ImageNet 预训练权重')
-    parser.add_argument('--weights_path', type=str, default='D:/codes/work-projects/Gastrovision_results/pretrained/resnet50.pth', help='预训练权重路径/目录（ImageNet 权重或 GastroNet 权重目录）')
+    parser.add_argument('--weights_path', type=str, default='D:/codes/work-projects/Gastrovision_results/pretrained/convnext_tiny.pth', help='预训练权重路径/目录（ImageNet 权重或 GastroNet 权重目录）')
     parser.add_argument('--freeze_backbone', action='store_true', default=False, help='冻结 backbone 只训练分类头')
     
     # 训练参数
@@ -507,23 +542,28 @@ def main():
     # 创建模型
     print(f"\n创建模型: {args.model}")
     
-    # finetune 模式：从 SSL 编码器权重加载
-    weights_to_load = None
+    # 确定要加载的权重
     if args.mode == 'finetune' and args.resume:
+        # finetune 模式：从 SSL 编码器权重加载
         weights_to_load = args.resume
         print(f"  微调模式: 加载 SSL 编码器权重 {args.resume}")
+        use_pretrained = False
+    else:
+        # train 模式：使用 weights_path
+        weights_to_load = args.weights_path
+        use_pretrained = args.pretrained
     
     model = get_model(
         args.model,
         num_classes=num_classes,
-        pretrained=args.pretrained if args.mode != 'finetune' else False,
+        pretrained=use_pretrained,
         weights_path=weights_to_load,
         freeze_backbone=args.freeze_backbone)
     model = model.to(device)
     
     # 创建数据加载器
     print("\n加载数据集...")
-    train_loader, valid_loader, test_loader = create_dataloaders(
+    train_loader, valid_loader, test_loader, _ = create_dataloaders(
         args.data_dir,
         batch_size=args.batch_size,
         num_workers=args.num_workers,

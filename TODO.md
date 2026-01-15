@@ -33,4 +33,8 @@ https://github.com/DebeshJha/GastroVision。这是一个多分类内镜图像识
 
 
 # TODO   
-1. main里面当visualize=True时，没有失效
+1. 准备用qwen3vl4b-thinking来训练这个分类任务，qwen3vl4b-thinking的huggingface链接https://huggingface.co/Qwen/Qwen3-VL-4B-Thinking。具体做法是，将类别0-26的标签映射为'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z'，'0'，这27个字符串，然后做多模态训练，输入为一张图像，输出为一个字符。计算指标的时候需要将字符先转为类别数值，然后再计算。
+
+2. 在main.py里面已经有了用现有的模型运行的过程  
+
+3. 需要在D:\codes\work-projects\Gastrovision_models\vlm_methods里面实现一个训练和预测qwen3vl4b-thinking的代码，需要有清晰的代码和注释; 需要有将数据做成qwen3vl4b-thinking的训练和推理的格式（目前是train.txt, valid.txt, test.txt, class_names.txt）

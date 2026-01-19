@@ -6,5 +6,9 @@ train.txt
 valid.txt
 test.txt
 class_names.txt
+*.md
 __pycache__
-WhaleSSL
+models_gastro
+data
+output
+qw3vl4B

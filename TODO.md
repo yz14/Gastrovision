@@ -28,13 +28,102 @@
 
 **测试环境为conda activate torch27_env**
 
-# 现状分析  
-https://github.com/DebeshJha/GastroVision。这是一个多分类内镜图像识别任务，类别不平衡处理：数据集包含27个类别，共8000张图像，某些病变类别样本极少  
-
 
 # TODO   
-1. 准备用qwen3vl4b-thinking来训练这个分类任务，qwen3vl4b-thinking的huggingface链接https://huggingface.co/Qwen/Qwen3-VL-4B-Thinking。具体做法是，将类别0-26的标签映射为'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z'，'0'，这27个字符串，然后做多模态训练，输入为一张图像，输出为一个字符。计算指标的时候需要将字符先转为类别数值，然后再计算。
 
-2. 在main.py里面已经有了用现有的模型运行的过程  
+1. 全面代码审查：main.py是训练入口，先全面彻底的检查所有的代码，是否有算法写错，损失函数写错，训练过程，逻辑写错等等  
+2. 实现以下损失函数，并提供参数来调用  
+1.1 Contrastive Loss — 孪生网络
+论文
+Dimensionality Reduction by Learning an Invariant Mapping (DrLIM)
+作者
+Hadsell, Chopra, LeCun
+会议
+CVPR 2006
+链接
+http://yann.lecun.com/exdb/publis/pdf/hadsell-chopra-lecun-06.pdf
+核心贡献：
 
-3. 需要在D:\codes\work-projects\Gastrovision_models\vlm_methods里面实现一个训练和预测qwen3vl4b-thinking的代码，需要有清晰的代码和注释; 需要有将数据做成qwen3vl4b-thinking的训练和推理的格式（目前是train.txt, valid.txt, test.txt, class_names.txt）
+提出最早的对比损失，将正对（相似样本）拉近，负对（不相似样本）推远
+损失形式：$$L = (1-y)\frac{1}{2}D^2 + y\frac{1}{2}\max(0,, m-D)^$$
+奠定后续所有对比学习的基本思想
+
+
+1.2 Triplet Loss
+论文
+FaceNet: A Unified Embedding for Face Recognition and Clustering
+作者
+Schroff, Kalenichenko, Philbin
+会议
+CVPR 2015
+链接
+https://arxiv.org/abs/1503.03832
+核心贡献：
+
+三元组 (Anchor, Positive, Negative) 形式，直接优化相对距离
+损失形式：$$L = \max(0,; d(a,p) - d(a,n) + \alpha$$
+提出 Online Hard Negative Mining，极大加速收敛
+在人脸识别上达到当时 SOTA，推动大规模度量学习实用化
+
+
+1.3 Lifted Structure Loss / Proxy NCA
+论文
+Deep Metric Learning via Lifted Structured Feature Embedding
+会议
+CVPR 2016
+链接
+https://arxiv.org/abs/1511.06452
+论文
+No Fuss Distance Metric Learning using Proxies
+会议
+ICCV 2017
+链接
+https://arxiv.org/abs/1703.07464
+核心贡献：
+
+Lifted Structure：批内所有正负对同时参与，充分利用 mini-batch 信息
+Proxy NCA：每类学一个代理向量（Proxy），大幅降低计算复杂度，训练更稳定
+
+
+1.4 N-pair Loss
+论文
+Improved Deep Metric Learning with Multi-class N-pair Loss Objective
+作者
+Sohn
+会议
+NeurIPS 2016
+链接
+https://papers.nips.cc/paper/2016/hash/6b180037abbebea991d8b1232f8a8ca9-Abstract.html
+核心贡献：
+
+将 Triplet 扩展为 N 对，每次更新同时考虑多个负样本
+等价于 InfoNCE 的前身，批次构造更高效
+避免 Triplet Loss 中大量无效三元组导致的训练崩溃
+
+
+1.5 SphereFace / CosFace / ArcFace — Angular Margin 系列
+SphereFace
+Deep Hypersphere Embedding for Face Recognition — CVPR 2017 · https://arxiv.org/abs/1704.08063
+CosFace
+Large Margin Cosine Loss — CVPR 2018 · https://arxiv.org/abs/1801.09414
+ArcFace
+Additive Angular Margin Loss — CVPR 2019 · https://arxiv.org/abs/1801.07698
+核心贡献（以 ArcFace 为代表）：
+
+在超球面上施加角度间隔（Angular Margin），几何意义明确
+损失形式：$$L = -\log\dfrac{e^{s\cos(\theta_{y_i}+m)}}{e^{s\cos(\theta_{y_i}+m)}+\sum_{j\neq y_i}e^{s\cos\theta_j}$$
+成为人脸识别事实标准，同样适用于医学图像检索、细粒度识别等任务
+
+
+1.6 Circle Loss
+论文
+Circle Loss: A Unified Perspective of Pair Similarity Optimization
+会议
+CVPR 2020
+链接
+https://arxiv.org/abs/2002.10857
+核心贡献：
+
+统一框架：将 Triplet、Softmax、N-pair 等多种损失纳入同一视角
+对每个相似度分数施加自适应权重，正负对梯度独立调节
+在度量学习与分类任务上均取得强基线性能

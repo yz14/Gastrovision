@@ -2,13 +2,11 @@
 
 
 
-train.txt
-valid.txt
-test.txt
-class_names.txt
-*.md
+
 __pycache__
 models_gastro
-data
+.txt
 output
 qw3vl4B
+*.txt
+experiments

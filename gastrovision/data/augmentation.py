@@ -206,6 +206,11 @@ class WarmupCosineScheduler:
         # 保存初始学习率
         self.base_lrs = [group['lr'] for group in optimizer.param_groups]
         self.current_epoch = 0
+        
+        # 立即应用 epoch-0 的 warmup LR，确保第一个 epoch 不会以
+        # 完整 base_lr 训练（scheduler.step() 在 epoch 结束后才调用）
+        for param_group, base_lr in zip(self.optimizer.param_groups, self.base_lrs):
+            param_group['lr'] = self._get_lr(base_lr)
     
     def step(self, epoch: int = None):
         """更新学习率"""

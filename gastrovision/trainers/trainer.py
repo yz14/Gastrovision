@@ -72,7 +72,9 @@ class Trainer:
         device: torch.device,
         scheduler: Optional[_LRScheduler] = None,
         output_dir: str = "./output",
-        class_names: Optional[List[str]] = None
+        class_names: Optional[List[str]] = None,
+        metric_loss: Optional[nn.Module] = None,
+        metric_loss_weight: float = 0.5
     ):
         self.model = model.to(device)
         self.criterion = criterion
@@ -81,6 +83,10 @@ class Trainer:
         self.scheduler = scheduler
         self.output_dir = Path(output_dir)
         self.class_names = class_names
+        
+        # 度量学习损失
+        self.metric_loss = metric_loss
+        self.metric_loss_weight = metric_loss_weight
         
         # 创建输出目录
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -97,6 +103,32 @@ class Trainer:
         # 最佳验证准确率
         self.best_valid_acc = 0.0
         self.best_epoch = 0
+
+    def _compute_metric_loss(
+        self,
+        logits: torch.Tensor,
+        features: torch.Tensor,
+        labels: torch.Tensor
+    ) -> torch.Tensor:
+        """计算度量学习损失并做维度安全检查。"""
+        metric_inputs = features
+
+        expected_dim = None
+        if hasattr(self.metric_loss, 'weight') and getattr(self.metric_loss, 'weight') is not None:
+            expected_dim = self.metric_loss.weight.shape[1]
+        elif hasattr(self.metric_loss, 'proxies') and getattr(self.metric_loss, 'proxies') is not None:
+            expected_dim = self.metric_loss.proxies.shape[1]
+
+        if expected_dim is not None and metric_inputs.dim() == 2 and metric_inputs.shape[1] != expected_dim:
+            if logits.dim() == 2 and logits.shape[1] == expected_dim:
+                metric_inputs = logits
+            else:
+                raise ValueError(
+                    f"Metric loss embedding dim mismatch: got {metric_inputs.shape[1]}, expected {expected_dim}. "
+                    f"Please set --embedding_dim to model feature dim or use a model that outputs (logits, features)."
+                )
+
+        return self.metric_loss(metric_inputs, labels)
     
     def train_epoch(
         self,
@@ -123,21 +155,41 @@ class Trainer:
         start_time = time.time()
         num_batches = len(train_loader)
         
+        metric_loss_meter = AverageMeter()
+        
         for batch_idx, (images, targets) in enumerate(train_loader):
             images = images.to(self.device, non_blocking=True)
             targets = targets.to(self.device, non_blocking=True)
             
             # 前向传播
             outputs = self.model(images)
-            loss = self.criterion(outputs, targets)
+            
+            # 处理模型输出 (可能是元组: logits, features)
+            if isinstance(outputs, tuple):
+                logits, features = outputs[0], outputs[-1]
+            else:
+                logits = outputs
+                features = outputs
+            
+            loss = self.criterion(logits, targets)
+            
+            # 度量学习损失
+            if self.metric_loss is not None:
+                ml_loss = self._compute_metric_loss(logits, features, targets)
+                loss = loss + self.metric_loss_weight * ml_loss
+                metric_loss_meter.update(ml_loss.item(), targets.size(0))
             
             # 反向传播
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
             
+            # OneCycleLR 需要每 step 调用（而非每 epoch）
+            if self.scheduler and isinstance(self.scheduler, torch.optim.lr_scheduler.OneCycleLR):
+                self.scheduler.step()
+            
             # 计算准确率
-            _, predicted = outputs.max(1)
+            _, predicted = logits.max(1)
             correct = predicted.eq(targets).sum().item()
             batch_size = targets.size(0)
             acc = correct / batch_size
@@ -150,9 +202,10 @@ class Trainer:
             if (batch_idx + 1) % max(1, num_batches // 5) == 0:
                 elapsed = time.time() - start_time
                 eta = elapsed / (batch_idx + 1) * (num_batches - batch_idx - 1)
+                metric_info = f" | Metric: {metric_loss_meter.avg:.4f}" if self.metric_loss else ""
                 print(f"  [{batch_idx + 1}/{num_batches}] "
                       f"Loss: {loss_meter.avg:.4f} | "
-                      f"Acc: {acc_meter.avg:.4f} | "
+                      f"Acc: {acc_meter.avg:.4f}{metric_info} | "
                       f"ETA: {eta:.0f}s")
         
         elapsed = time.time() - start_time
@@ -190,9 +243,10 @@ class Trainer:
             targets = targets.to(self.device, non_blocking=True)
             
             outputs = self.model(images)
-            loss = self.criterion(outputs, targets)
+            logits = outputs[0] if isinstance(outputs, tuple) else outputs
+            loss = self.criterion(logits, targets)
             
-            _, predicted = outputs.max(1)
+            _, predicted = logits.max(1)
             
             loss_meter.update(loss.item(), targets.size(0))
             all_predictions.extend(predicted.cpu().numpy())
@@ -242,8 +296,9 @@ class Trainer:
             targets = targets.to(self.device, non_blocking=True)
             
             outputs = self.model(images)
-            probs = torch.softmax(outputs, dim=1)
-            _, predicted = outputs.max(1)
+            logits = outputs[0] if isinstance(outputs, tuple) else outputs
+            probs = torch.softmax(logits, dim=1)
+            _, predicted = logits.max(1)
             
             all_predictions.extend(predicted.cpu().numpy())
             all_targets.extend(targets.cpu().numpy())
@@ -427,9 +482,11 @@ class Trainer:
                   f"Acc: {valid_metrics['accuracy']:.4f}, "
                   f"F1: {valid_metrics['f1']:.4f}")
             
-            # 更新学习率
+            # 更新学习率（OneCycleLR 已在 train_epoch 中按 step 更新）
             if self.scheduler:
-                if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                if isinstance(self.scheduler, torch.optim.lr_scheduler.OneCycleLR):
+                    pass  # 已在 train_epoch 中每 batch 调用
+                elif isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
                     self.scheduler.step(valid_metrics['loss'])
                 else:
                     self.scheduler.step()

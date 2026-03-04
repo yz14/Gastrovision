@@ -24,12 +24,22 @@ import torch.nn as nn
 from torch.optim import Adam, SGD, AdamW
 from torch.optim.lr_scheduler import (StepLR, CosineAnnealingLR, ReduceLROnPlateau, OneCycleLR)
 
-# 本地模块
-from dataset import create_dataloaders, get_class_weights
-from trainer import Trainer, print_test_results
-from augmentation import (mixup_data, mixup_criterion, cutmix_data, WarmupCosineScheduler)
-from losses import LabelSmoothingCrossEntropy, FocalLoss, ClassBalancedLoss
-import resnet
+# 本地模块 - gastrovision 包
+from gastrovision.data import (
+    create_dataloaders, create_multilabel_dataloaders, get_class_weights,
+    MultilabelIdentitySampler, GastrovisionMultilabelDataset
+)
+from gastrovision.data.augmentation import (
+    mixup_data, mixup_criterion, cutmix_data, WarmupCosineScheduler
+)
+from gastrovision.trainers import Trainer, print_test_results
+from gastrovision.trainers.multilabel import MultilabelTrainer, print_multilabel_test_results
+from gastrovision.losses import (
+    LabelSmoothingCrossEntropy, FocalLoss, ClassBalancedLoss,
+    CombinedMultilabelLoss, FocalLossMultilabel, FocalOHEMLoss, AsymmetricLoss, TripletLoss
+)
+from gastrovision.losses.metric_learning import create_metric_loss
+from gastrovision.models import resnet
 
 # SSL 模块 (懒加载以避免不需要时的开销)
 def _get_ssl_model(args, backbone):
@@ -357,6 +367,23 @@ def get_optimizer(
         raise ValueError(f"不支持的优化器: {optimizer_name}")
 
 
+def get_optimizer_from_params(
+    params,
+    optimizer_name: str,
+    lr: float,
+    weight_decay: float
+) -> torch.optim.Optimizer:
+    """从参数列表获取优化器（支持合并模型参数和度量学习损失参数）"""
+    if optimizer_name == 'adam':
+        return Adam(params, lr=lr, weight_decay=weight_decay)
+    elif optimizer_name == 'adamw':
+        return AdamW(params, lr=lr, weight_decay=weight_decay)
+    elif optimizer_name == 'sgd':
+        return SGD(params, lr=lr, momentum=0.9, weight_decay=weight_decay)
+    else:
+        raise ValueError(f"不支持的优化器: {optimizer_name}")
+
+
 def get_scheduler(
     optimizer: torch.optim.Optimizer,
     scheduler_name: str,
@@ -410,8 +437,6 @@ def create_loss_function(args, device):
         return nn.CrossEntropyLoss()
     
     elif args.loss_type == 'focal':
-        if args.label_smoothing > 0:
-            return FocalLoss(gamma=args.focal_gamma, label_smoothing=args.label_smoothing)
         return FocalLoss(gamma=args.focal_gamma)
     
     elif args.loss_type in ['cb_focal', 'cb_softmax']:
@@ -425,11 +450,55 @@ def create_loss_function(args, device):
             samples_per_class=samples_per_class,
             loss_type=loss_type,
             beta=0.9999,
-            gamma=args.focal_gamma,
-            device=device)
+            gamma=args.focal_gamma)
     
     else:
         raise ValueError(f"不支持的损失函数: {args.loss_type}")
+
+
+def create_metric_loss_function(args, num_classes: int, device):
+    """
+    创建度量学习损失函数
+    
+    Args:
+        args: 命令行参数
+        num_classes: 类别数量
+        device: 设备
+        
+    Returns:
+        (metric_criterion, needs_features) 或 (None, False) 如果禁用
+        - metric_criterion: 度量学习损失函数实例
+        - needs_features: 模型是否需要输出特征 (True for all metric losses)
+    """
+    if args.metric_loss == 'none':
+        return None, False
+    
+    # 构造额外参数
+    kwargs = {}
+    if args.metric_loss_margin > 0:
+        kwargs['margin'] = args.metric_loss_margin
+    if args.metric_loss_scale > 0:
+        kwargs['scale'] = args.metric_loss_scale
+    
+    metric_criterion = create_metric_loss(
+        loss_type=args.metric_loss,
+        num_classes=num_classes,
+        embedding_dim=args.embedding_dim,
+        **kwargs
+    )
+    metric_criterion = metric_criterion.to(device)
+    
+    print(f"度量学习损失: {args.metric_loss.upper()}")
+    print(f"  - 权重: {args.metric_loss_weight}")
+    if args.metric_loss_margin > 0:
+        print(f"  - margin: {args.metric_loss_margin}")
+    if args.metric_loss_scale > 0:
+        print(f"  - scale: {args.metric_loss_scale}")
+    if args.metric_loss in ['proxy_nca', 'arcface', 'cosface', 'sphereface', 'circle_cls']:
+        print(f"  - embedding_dim: {args.embedding_dim}")
+        print(f"  - 注意: 此损失含可学习参数，已加入优化器")
+    
+    return metric_criterion, True
 
 
 def load_class_names(data_dir: str) -> list:
@@ -439,6 +508,147 @@ def load_class_names(data_dir: str) -> list:
         with open(class_names_file, 'r', encoding='utf-8') as f:
             return [line.strip() for line in f if line.strip()]
     return None
+
+
+def run_multilabel_training(args, device, output_dir):
+    """运行多标签训练"""
+    print("=" * 60)
+    print("多标签分类训练模式")
+    print("=" * 60)
+    
+    # 加载多标签数据
+    print("\n加载多标签数据集...")
+    train_loader, valid_loader, test_loader, num_classes, class_names = create_multilabel_dataloaders(
+        data_dir=args.data_dir,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        image_size=args.image_size,
+        num_classes=args.num_classes,
+        use_triplet_sampler=args.use_triplet,
+        triplet_num_instances=args.triplet_num_instances)
+    print()
+    
+    # 创建模型（输出维度为 num_classes）
+    print(f"创建模型: {args.model}")
+    
+    if args.mode == 'finetune' and args.resume:
+        weights_to_load = args.resume
+        use_pretrained = False
+    else:
+        weights_to_load = args.weights_path
+        use_pretrained = args.pretrained
+    
+    model = get_model(
+        args.model,
+        num_classes=num_classes,
+        pretrained=use_pretrained,
+        weights_path=weights_to_load,
+        freeze_backbone=args.freeze_backbone
+    )
+    model = model.to(device)
+    
+    # 多标签损失函数
+    if args.multilabel_loss == 'bce':
+        criterion = nn.BCEWithLogitsLoss()
+        print(f"损失函数: BCEWithLogitsLoss")
+    else:
+        criterion = CombinedMultilabelLoss(
+            loss_type=args.multilabel_loss,
+            focal_gamma=args.multilabel_focal_gamma,
+            ohem_ratio=args.multilabel_ohem_ratio,
+            asl_gamma_neg=args.asl_gamma_neg,
+            asl_gamma_pos=args.asl_gamma_pos,
+            asl_clip=args.asl_clip,
+            label_smoothing=args.label_smoothing_factor,
+            poly_epsilon=args.poly_epsilon)
+        print(f"损失函数: {args.multilabel_loss.upper()}")
+        if 'focal' in args.multilabel_loss:
+            print(f"  - gamma: {args.multilabel_focal_gamma}")
+        if 'ohem' in args.multilabel_loss:
+            print(f"  - ohem_ratio: {args.multilabel_ohem_ratio}")
+        if args.multilabel_loss in ['asymmetric', 'asl']:
+            print(f"  - gamma_neg: {args.asl_gamma_neg}, gamma_pos: {args.asl_gamma_pos}, clip: {args.asl_clip}")
+        if args.multilabel_loss == 'label_smoothing':
+            print(f"  - smoothing: {args.label_smoothing_factor}")
+        if args.multilabel_loss == 'poly':
+            print(f"  - epsilon: {args.poly_epsilon}")
+    
+    # 度量学习损失
+    metric_criterion, _ = create_metric_loss_function(args, num_classes, device)
+    
+    # 优化器 (如果度量学习损失含可学习参数，一并加入)
+    all_params = list(model.parameters())
+    if metric_criterion is not None:
+        metric_params = list(metric_criterion.parameters())
+        if metric_params:
+            all_params += metric_params
+    optimizer = get_optimizer_from_params(all_params, args.optimizer, args.lr, args.weight_decay)
+    print(f"优化器: {type(optimizer).__name__} (lr={args.lr})")
+    
+    # 学习率调度器
+    scheduler = get_scheduler(
+        optimizer, args.scheduler, args.epochs,
+        steps_per_epoch=len(train_loader),
+        warmup_epochs=args.warmup_epochs
+    )
+    if scheduler:
+        print(f"调度器: {args.scheduler}")
+    print()
+    
+    # Triplet Loss (WhaleSSL 风格)
+    triplet_criterion = None
+    if args.use_triplet:
+        triplet_criterion = TripletLoss(margin=args.triplet_margin)
+        print(f"Triplet Loss: margin={args.triplet_margin}, weight={args.triplet_weight}")
+    
+    # 创建多标签训练器
+    trainer = MultilabelTrainer(
+        model=model,
+        criterion=criterion,
+        optimizer=optimizer,
+        device=device,
+        scheduler=scheduler,
+        output_dir=str(output_dir),
+        class_names=class_names,
+        threshold=args.multilabel_threshold,
+        triplet_loss=triplet_criterion,
+        triplet_weight=args.triplet_weight,
+        metric_loss=metric_criterion,
+        metric_loss_weight=args.metric_loss_weight
+    )
+    
+    # 从 checkpoint 恢复
+    if args.resume and args.mode == 'train':
+        print(f"从 checkpoint 恢复: {args.resume}")
+        trainer.load_checkpoint(args.resume)
+    
+    # 只测试模式
+    if args.test_only:
+        print("运行测试...")
+        results = trainer.test(test_loader)
+        print_multilabel_test_results(results)
+        return
+    
+    # 训练
+    trainer.fit(
+        train_loader=train_loader,
+        valid_loader=valid_loader,
+        epochs=args.epochs,
+        early_stopping=args.early_stopping
+    )
+    
+    # 加载最佳模型进行测试
+    print("\n加载最佳模型进行测试...")
+    trainer.load_checkpoint('best_model.pth')
+    
+    # 优化每个类别的阈值 (基于验证集)
+    trainer.optimize_thresholds(valid_loader)
+    
+    # 测试
+    results = trainer.test(test_loader)
+    print_multilabel_test_results(results)
+    
+    print("\n多标签训练完成!")
 
 
 def main():
@@ -457,17 +667,17 @@ def main():
     parser.add_argument('--momentum', type=float, default=0.996, help='动量参数 (MoCo/BYOL/DINO)')
     
     # 数据参数
-    parser.add_argument('--data_dir', type=str, default='D:/codes/work-projects/Gastrovision_models', help='数据目录（包含 train.txt, valid.txt 等）')
-    parser.add_argument('--output_dir', type=str, default='D:/codes/work-projects/Gastrovision_results/convnext_tiny', help='输出目录')
+    parser.add_argument('--data_dir', type=str, default='D:/codes/work-projects/Gastrovision_models/data', help='数据目录（包含 train.txt, valid.txt 等）')
+    parser.add_argument('--output_dir', type=str, default='D:/codes/work-projects/Gastrovision_results/res50_kvasir_pbackbone', help='输出目录')
     
     # 模型参数
-    parser.add_argument('--model', type=str, default='convnext_tiny', help='模型名称 (resnet18/34/50/101/152, resnext50/101, wide_resnet50/101, gastronet_resnet50_dino, gastronet_vit_small 等)')
+    parser.add_argument('--model', type=str, default='resnet50', help='模型名称 (resnet18/34/50/101/152, resnext50/101, wide_resnet50/101, gastronet_resnet50_dino, gastronet_vit_small 等)')
     parser.add_argument('--pretrained', action='store_true', default=True, help='使用 ImageNet 预训练权重')
-    parser.add_argument('--weights_path', type=str, default='D:/codes/work-projects/Gastrovision_results/pretrained/convnext_tiny.pth', help='预训练权重路径/目录（ImageNet 权重或 GastroNet 权重目录）')
+    parser.add_argument('--weights_path', type=str, default='D:/codes/work-projects/Gastrovision_results/res50_kvasir_backbone/best_model.pth', help='预训练权重路径/目录（ImageNet 权重或 GastroNet 权重目录）')
     parser.add_argument('--freeze_backbone', action='store_true', default=False, help='冻结 backbone 只训练分类头')
     
     # 训练参数
-    parser.add_argument('--epochs', type=int, default=40, help='训练轮数')
+    parser.add_argument('--epochs', type=int, default=100, help='训练轮数')
     parser.add_argument('--batch_size', type=int, default=32, help='批次大小')
     parser.add_argument('--lr', type=float, default=1e-3, help='学习率')
     parser.add_argument('--weight_decay', type=float, default=1e-4, help='权重衰减')
@@ -493,9 +703,45 @@ def main():
     parser.add_argument('--seed', type=int, default=42, help='随机种子')
     parser.add_argument('--use_class_weights', action='store_true', help='使用类别权重处理不平衡')
     parser.add_argument('--test_only', action='store_true', help='只进行测试（需要提供 checkpoint）')
-    parser.add_argument('--resume', type=str, default=None, help='从 checkpoint 恢复训练')
+    parser.add_argument('--resume', type=str, default='', help='从 checkpoint 恢复训练（空=不恢复）')
     parser.add_argument('--visualize', action='store_true', default=True, help='训练后生成可视化图表')
     
+    # 多标签参数
+    parser.add_argument('--multilabel', action='store_true', default=True, help='使用多标签训练模式')
+    parser.add_argument('--multilabel_threshold', type=float, default=0.5, help='多标签分类阈值')
+    parser.add_argument('--num_classes', type=int, default=16, help='多标签类别数量')
+    parser.add_argument('--multilabel_loss', type=str, default='focal_ohem', 
+                        choices=['bce', 'focal', 'focal_ohem', 'asymmetric', 'asl', 
+                                 'label_smoothing', 'poly', 'dice', 'softmax'],
+                        help='多标签损失函数类型')
+    parser.add_argument('--multilabel_focal_gamma', type=float, default=2.0, help='多标签 Focal Loss gamma')
+    parser.add_argument('--multilabel_ohem_ratio', type=float, default=0.4, help='OHEM 困难样本比例 (0.01-1.0)')
+    parser.add_argument('--asl_gamma_neg', type=float, default=4.0, help='ASL 负样本 gamma')
+    parser.add_argument('--asl_gamma_pos', type=float, default=1.0, help='ASL 正样本 gamma')
+    parser.add_argument('--asl_clip', type=float, default=0.05, help='ASL 概率裁剪值')
+    parser.add_argument('--label_smoothing_factor', type=float, default=0.1, help='标签平滑系数')
+    parser.add_argument('--poly_epsilon', type=float, default=1.0, help='Poly Loss epsilon')
+    
+    # Triplet Loss 相关参数 (WhaleSSL 风格)
+    parser.add_argument('--use_triplet', action='store_true', default=False, help='启用 Triplet Loss 训练')
+    parser.add_argument('--triplet_weight', type=float, default=1.0, help='Triplet Loss 权重')
+    parser.add_argument('--triplet_margin', type=float, default=0.3, help='Triplet Loss margin')
+    parser.add_argument('--triplet_num_instances', type=int, default=4, help='每个身份的实例数')
+    
+    # 度量学习损失参数
+    parser.add_argument('--metric_loss', type=str, default='none',
+                        choices=['none', 'contrastive', 'triplet', 'lifted', 'proxy_nca',
+                                 'npair', 'arcface', 'cosface', 'sphereface', 'circle', 'circle_cls'],
+                        help='度量学习损失类型 (none=禁用)')
+    parser.add_argument('--metric_loss_weight', type=float, default=0.5,
+                        help='度量学习损失权重 (与主损失的加权比)')
+    parser.add_argument('--metric_loss_margin', type=float, default=0.0,
+                        help='度量学习损失 margin (0=使用各损失默认值)')
+    parser.add_argument('--metric_loss_scale', type=float, default=0.0,
+                        help='度量学习损失 scale (0=使用各损失默认值, ArcFace 默认 30, Circle 默认 256)')
+    parser.add_argument('--embedding_dim', type=int, default=512,
+                        help='度量学习嵌入维度 (用于 ProxyNCA/ArcFace/CircleLoss_cls)')
+
     args = parser.parse_args()
     
     # 设置随机种子
@@ -534,7 +780,12 @@ def main():
         for key, value in vars(args).items():
             f.write(f"{key}: {value}\n")
     
-    # 加载类别名称
+    # 多标签模式分支
+    if args.multilabel:
+        run_multilabel_training(args, device, output_dir)
+        return
+    
+    # 加载类别名称 (单标签模式)
     class_names = load_class_names(args.data_dir)
     num_classes = len(class_names) if class_names else 22  # 默认 22 类
     print(f"类别数: {num_classes}")
@@ -579,8 +830,16 @@ def main():
     criterion = create_loss_function(args, device)
     print(f"损失函数: {type(criterion).__name__}")
     
-    # 优化器
-    optimizer = get_optimizer(model, args.optimizer, args.lr, args.weight_decay)
+    # 度量学习损失
+    metric_criterion, _ = create_metric_loss_function(args, num_classes, device)
+    
+    # 优化器 (如果度量学习损失含可学习参数，一并加入)
+    all_params = list(model.parameters())
+    if metric_criterion is not None:
+        metric_params = list(metric_criterion.parameters())
+        if metric_params:
+            all_params += metric_params
+    optimizer = get_optimizer_from_params(all_params, args.optimizer, args.lr, args.weight_decay)
     print(f"优化器: {type(optimizer).__name__} (lr={args.lr})")
     
     # 学习率调度器
@@ -602,7 +861,9 @@ def main():
         device=device,
         scheduler=scheduler,
         output_dir=str(output_dir),
-        class_names=class_names)
+        class_names=class_names,
+        metric_loss=metric_criterion,
+        metric_loss_weight=args.metric_loss_weight)
     
     # 从 checkpoint 恢复（分类训练）
     if args.resume and args.mode == 'train':

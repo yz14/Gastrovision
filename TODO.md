@@ -18,7 +18,11 @@
 ## 调试支持
 - 如有需要，可以加入 debug/logging 函数辅助开发
 - 通过日志输出帮助定位和解决问题
-- 调试代码可在功能稳定后标注或移除
+- 调试代码可在功能稳定后标注或移除  
+
+## 代码质量  
+- 注意代码尽可能模块化设计，职责尽可能的分离，不要把所有代码写在一个文件里，不方便后续理解和维护  
+- 注意代码的复用性，不要写重复的代码  
 
 ## 沟通规范
 - **开始前**：说明你理解的任务目标和将遵守的规则
@@ -31,99 +35,11 @@
 
 # TODO   
 
-1. 全面代码审查：main.py是训练入口，先全面彻底的检查所有的代码，是否有算法写错，损失函数写错，训练过程，逻辑写错等等  
-2. 实现以下损失函数，并提供参数来调用  
-1.1 Contrastive Loss — 孪生网络
-论文
-Dimensionality Reduction by Learning an Invariant Mapping (DrLIM)
-作者
-Hadsell, Chopra, LeCun
-会议
-CVPR 2006
-链接
-http://yann.lecun.com/exdb/publis/pdf/hadsell-chopra-lecun-06.pdf
-核心贡献：
-
-提出最早的对比损失，将正对（相似样本）拉近，负对（不相似样本）推远
-损失形式：$$L = (1-y)\frac{1}{2}D^2 + y\frac{1}{2}\max(0,, m-D)^$$
-奠定后续所有对比学习的基本思想
-
-
-1.2 Triplet Loss
-论文
-FaceNet: A Unified Embedding for Face Recognition and Clustering
-作者
-Schroff, Kalenichenko, Philbin
-会议
-CVPR 2015
-链接
-https://arxiv.org/abs/1503.03832
-核心贡献：
-
-三元组 (Anchor, Positive, Negative) 形式，直接优化相对距离
-损失形式：$$L = \max(0,; d(a,p) - d(a,n) + \alpha$$
-提出 Online Hard Negative Mining，极大加速收敛
-在人脸识别上达到当时 SOTA，推动大规模度量学习实用化
-
-
-1.3 Lifted Structure Loss / Proxy NCA
-论文
-Deep Metric Learning via Lifted Structured Feature Embedding
-会议
-CVPR 2016
-链接
-https://arxiv.org/abs/1511.06452
-论文
-No Fuss Distance Metric Learning using Proxies
-会议
-ICCV 2017
-链接
-https://arxiv.org/abs/1703.07464
-核心贡献：
-
-Lifted Structure：批内所有正负对同时参与，充分利用 mini-batch 信息
-Proxy NCA：每类学一个代理向量（Proxy），大幅降低计算复杂度，训练更稳定
-
-
-1.4 N-pair Loss
-论文
-Improved Deep Metric Learning with Multi-class N-pair Loss Objective
-作者
-Sohn
-会议
-NeurIPS 2016
-链接
-https://papers.nips.cc/paper/2016/hash/6b180037abbebea991d8b1232f8a8ca9-Abstract.html
-核心贡献：
-
-将 Triplet 扩展为 N 对，每次更新同时考虑多个负样本
-等价于 InfoNCE 的前身，批次构造更高效
-避免 Triplet Loss 中大量无效三元组导致的训练崩溃
-
-
-1.5 SphereFace / CosFace / ArcFace — Angular Margin 系列
-SphereFace
-Deep Hypersphere Embedding for Face Recognition — CVPR 2017 · https://arxiv.org/abs/1704.08063
-CosFace
-Large Margin Cosine Loss — CVPR 2018 · https://arxiv.org/abs/1801.09414
-ArcFace
-Additive Angular Margin Loss — CVPR 2019 · https://arxiv.org/abs/1801.07698
-核心贡献（以 ArcFace 为代表）：
-
-在超球面上施加角度间隔（Angular Margin），几何意义明确
-损失形式：$$L = -\log\dfrac{e^{s\cos(\theta_{y_i}+m)}}{e^{s\cos(\theta_{y_i}+m)}+\sum_{j\neq y_i}e^{s\cos\theta_j}$$
-成为人脸识别事实标准，同样适用于医学图像检索、细粒度识别等任务
-
-
-1.6 Circle Loss
-论文
-Circle Loss: A Unified Perspective of Pair Similarity Optimization
-会议
-CVPR 2020
-链接
-https://arxiv.org/abs/2002.10857
-核心贡献：
-
-统一框架：将 Triplet、Softmax、N-pair 等多种损失纳入同一视角
-对每个相似度分数施加自适应权重，正负对梯度独立调节
-在度量学习与分类任务上均取得强基线性能
+1. 我测试了train_cls.py发现了几个重大的问题：a. 分类head的替换(fc): Linear(in_features=2048, out_features=23, bias=True)这个head会不会太过简单；b. self._compute_metric_loss(logits, features, targets)度量学习这里输入的是torch.Size([32, 23]) torch.Size([32, 23])，也就是说把最后fc的输出的用于最终23分类的logits输入到度量损失中，确定这样做对所有的度量损失都是合理的吗？c. 每次运行都输出：学习率: 0.000200
+处理完成，已生成单标签文件。
+处理完成，已生成单标签文件。
+处理完成，已生成单标签文件。
+处理完成，已生成单标签文件。  
+2. 模块化仍然做的不够好，怎么又是build_parser，又是导入yaml，这样做太混乱了，全部移到yaml中，并对参数做注释。  
+3. 不要在函数里面进行import，需要import的提前在最开头导入好  
+4. 以上只是我初步的发现，如果有类似问题，请检查，分析。  

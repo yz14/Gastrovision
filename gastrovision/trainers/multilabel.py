@@ -29,24 +29,11 @@ from sklearn.metrics import (
     average_precision_score
 )
 
+from ..data.augmentation import mixup_data, mixup_criterion, cutmix_data
+from ..utils.metrics import AverageMeter
 
-class AverageMeter:
-    """计算和存储平均值"""
-    
-    def __init__(self):
-        self.reset()
-    
-    def reset(self):
-        self.val = 0
-        self.avg = 0
-        self.sum = 0
-        self.count = 0
-    
-    def update(self, val: float, n: int = 1):
-        self.val = val
-        self.sum += val * n
-        self.count += n
-        self.avg = self.sum / self.count
+
+
 
 
 class MultilabelTrainer:
@@ -77,7 +64,9 @@ class MultilabelTrainer:
         triplet_loss: Optional[nn.Module] = None,
         triplet_weight: float = 1.0,
         metric_loss: Optional[nn.Module] = None,
-        metric_loss_weight: float = 0.5
+        metric_loss_weight: float = 0.5,
+        mixup_alpha: float = 0.0,
+        cutmix_alpha: float = 0.0
     ):
         self.model = model.to(device)
         self.criterion = criterion
@@ -95,6 +84,10 @@ class MultilabelTrainer:
         # 通用度量学习损失
         self.metric_loss = metric_loss
         self.metric_loss_weight = metric_loss_weight
+        
+        # Mixup / CutMix
+        self.mixup_alpha = mixup_alpha
+        self.cutmix_alpha = cutmix_alpha
         
         # 创建输出目录
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -155,9 +148,25 @@ class MultilabelTrainer:
         start_time = time.time()
         num_batches = len(train_loader)
         
+        use_mixup = self.mixup_alpha > 0 or self.cutmix_alpha > 0
+        
         for batch_idx, (images, targets) in enumerate(train_loader):
             images = images.to(self.device, non_blocking=True)
             targets = targets.to(self.device, non_blocking=True)
+            
+            # Mixup / CutMix 数据增强
+            mixed = False
+            if use_mixup:
+                if self.mixup_alpha > 0 and self.cutmix_alpha > 0:
+                    if np.random.random() > 0.5:
+                        images, y_a, y_b, lam = mixup_data(images, targets, self.mixup_alpha)
+                    else:
+                        images, y_a, y_b, lam = cutmix_data(images, targets, self.cutmix_alpha)
+                elif self.mixup_alpha > 0:
+                    images, y_a, y_b, lam = mixup_data(images, targets, self.mixup_alpha)
+                else:
+                    images, y_a, y_b, lam = cutmix_data(images, targets, self.cutmix_alpha)
+                mixed = True
             
             # 前向传播
             outputs = self.model(images)
@@ -170,19 +179,22 @@ class MultilabelTrainer:
                 features = outputs  # 使用 logits 作为 embeddings
             
             # 主损失 (BCE/Focal/ASL 等)
-            loss = self.criterion(logits, targets)
+            if mixed:
+                loss = mixup_criterion(self.criterion, logits, y_a, y_b, lam)
+            else:
+                loss = self.criterion(logits, targets)
             
-            # Triplet Loss (WhaleSSL 风格)
+            # Triplet Loss (WhaleSSL 风格) — 混合样本时跳过
             triplet_loss_val = 0.0
-            if self.triplet_loss is not None:
+            if self.triplet_loss is not None and not mixed:
                 # 从多标签中提取主标签作为身份
                 primary_labels = targets.argmax(dim=1)  # 使用最大激活标签
                 triplet_loss_val = self.triplet_loss(features, primary_labels)
                 loss = loss + self.triplet_weight * triplet_loss_val
                 triplet_loss_meter.update(triplet_loss_val.item(), targets.size(0))
             
-            # 通用度量学习损失
-            if self.metric_loss is not None:
+            # 通用度量学习损失 — 混合样本时跳过
+            if self.metric_loss is not None and not mixed:
                 primary_labels = targets.argmax(dim=1)
                 ml_loss = self._compute_metric_loss(logits, features, primary_labels)
                 loss = loss + self.metric_loss_weight * ml_loss

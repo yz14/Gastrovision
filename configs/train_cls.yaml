@@ -1,0 +1,92 @@
+# ================================================================
+# 内镜图像单标签分类 — 训练配置
+# ================================================================
+#
+# 使用方式:
+#   python train_cls.py configs/train_cls.yaml
+#
+# 所有参数都在此文件中配置，不需要 CLI 参数。
+# ================================================================
+
+# ---- 数据 ----
+data_dir: "D:/codes/data/hyper_kvasir/labeled-images"   # 数据目录，须包含 train.txt / valid.txt / test.txt
+output_dir: "D:/codes/work-projects/Gastrovision_results/cls_default"  # 训练输出目录 (checkpoint, 日志, 图表)
+
+# ---- 模型 ----
+model: "resnet50"          # 可选: resnet18/34/50/101/152, resnext50/101, wide_resnet50/101,
+                           #       convnext_tiny/small/base/large,
+                           #       efficientnet_v2_s/m/l,
+                           #       swin_t/s/b,
+                           #       gastronet_resnet50_dino, gastronet_vit_small
+pretrained: true           # 使用 ImageNet 预训练权重
+weights_path: ""           # 本地预训练权重路径 (为空则使用官方权重)
+freeze_backbone: false     # 冻结 backbone，只训练分类头 (用于 linear probing)
+
+# 分类头设计
+# "linear": 标准单层 Linear(in_features, num_classes)
+# "mlp":    两层 MLP: Linear → ReLU → Dropout → Linear，增强非线性拟合能力
+classifier_head: "linear"
+classifier_dropout: 0.2    # MLP head 的 dropout 概率 (仅 classifier_head=mlp 时生效)
+
+# ---- 训练 ----
+epochs: 100
+batch_size: 32
+lr: 0.001                  # 初始学习率
+weight_decay: 0.0001       # 权重衰减 (L2 正则化)
+optimizer: "adamw"         # 可选: adam / adamw / sgd
+scheduler: "warmup_cosine" # 可选: step / cosine / plateau / onecycle / warmup_cosine / none
+warmup_epochs: 5           # 学习率预热轮数 (仅 warmup_cosine 生效)
+early_stopping: 15         # 早停耐心值 (0=禁用)
+seed: 42                   # 随机种子
+
+# ---- 图像与增强 ----
+image_size: 224            # 输入图像尺寸 (正方形)
+num_workers: 4             # DataLoader 工作进程数
+use_albumentations: false  # 使用 Albumentations 库增强 (否则使用 torchvision)
+augment_level: "medium"    # Albumentations 增强级别: light / medium / heavy
+
+# ---- 损失函数 ----
+loss_type: "focal"         # 可选: ce (交叉熵) / focal / cb_focal (类别平衡 Focal) / cb_softmax
+focal_gamma: 2.0           # Focal Loss 的 gamma (越大越关注难样本)
+label_smoothing: 0.0       # 标签平滑系数 (0=禁用，推荐 0.1)
+
+# ---- 数据增强策略 ----
+mixup: 0.0                 # Mixup alpha (0=禁用，推荐 0.2-0.4)
+cutmix: 0.0                # CutMix alpha (0=禁用，推荐 1.0)
+
+# ---- 度量学习 ----
+# 度量学习通过额外的损失函数约束特征空间的几何结构，
+# 使同类样本特征更近、异类更远，辅助分类器学习更好的表示。
+#
+# proxy-based (推荐): arcface / cosface / sphereface / proxy_nca / circle_cls
+#   → 每个类别维护一个可学习代理向量，无需正/负样本对
+#   → 适合类别数多、batch 小的场景 (如 23 类 + batch_size=32)
+#
+# pair-based: contrastive / triplet / lifted / npair / circle
+#   → 需要 batch 内有足够的同类样本对
+#   → batch_size=32 + 23 类 ≈ 每类 1.4 样本 → 正样本对极少 → 效果差
+#   → 如需使用，建议 batch_size≥128 或使用 gradient accumulation
+metric_loss: "contrastive"        # 可选: none / contrastive / triplet / lifted / proxy_nca /
+                           #       npair / arcface / cosface / sphereface / circle / circle_cls
+metric_loss_weight: 0.5    # 度量学习损失权重 (cls_loss + weight * metric_loss)
+metric_loss_margin: 0.0    # margin 参数 (0=使用各损失的默认值)
+metric_loss_scale: 0.0     # scale 参数 (0=使用各损失的默认值)
+embedding_dim: 512         # 嵌入维度 (一般自动适配为 backbone 输出维度)
+
+# ---- EMA (指数滑动平均) ----
+# EMA 维护模型参数的滑动平均，验证/测试时使用 EMA 参数，通常提升 0.5-1.5%
+ema: false                 # 是否启用 EMA
+ema_decay: 0.9999          # EMA 衰减系数 (越大越平滑)
+
+# ---- TTA (测试时增强) ----
+# TTA 在推理阶段对输入生成多个增强视图并聚合预测，零训练成本提升 1-3%
+tta: false                 # 是否启用 TTA
+tta_level: "medium"        # TTA 级别: light (2 views) / medium (4 views) / heavy (6 views)
+
+# ---- 调试 ----
+metric_debug: false        # 启用度量学习诊断 (特征范数/类间距离/梯度/损失平衡监控)
+
+# ---- 运行模式 ----
+test_only: false           # 只进行测试 (需配合 resume 指定 checkpoint)
+resume: ""                 # 从 checkpoint 恢复训练的路径 (为空=从头训练)
+visualize: true            # 训练后生成可视化图表

@@ -8,9 +8,13 @@ Gastrovision 数据加载模块
 """
 
 import os
+import copy
+import random
 from pathlib import Path
 from typing import Tuple, List, Optional, Callable, Dict
+from collections import defaultdict, Counter
 
+import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 from PIL import Image
@@ -251,11 +255,6 @@ class MultilabelIdentitySampler:
         num_instances: int = 4,
         identity_strategy: str = 'first'
     ):
-        from collections import defaultdict
-        import copy
-        import random
-        import numpy as np
-        
         self.dataset = dataset
         self.batch_size = batch_size
         self.num_instances = num_instances
@@ -293,7 +292,6 @@ class MultilabelIdentitySampler:
     
     def _get_identity(self, labels) -> Optional[int]:
         """从多热标签中获取身份 (主标签)"""
-        import torch
         
         # 获取所有正标签的索引
         if isinstance(labels, torch.Tensor):
@@ -317,11 +315,6 @@ class MultilabelIdentitySampler:
             return positive_indices[0]
     
     def __iter__(self):
-        import copy
-        import random
-        import numpy as np
-        from collections import defaultdict
-        
         batch_idxs_dict = defaultdict(list)
         
         for pid in self.pids:
@@ -451,7 +444,7 @@ def create_dataloaders(
     # 选择数据增强方式
     if use_albumentations:
         try:
-            from transforms_album import get_wrapped_transforms
+            from .transforms import get_wrapped_transforms
             train_transform = get_wrapped_transforms('train', image_size, augment_level)
             valid_transform = get_wrapped_transforms('valid', image_size)
             test_transform = get_wrapped_transforms('test', image_size)

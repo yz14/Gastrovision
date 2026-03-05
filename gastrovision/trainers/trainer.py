@@ -10,6 +10,7 @@ Gastrovision 训练器模块
 import os
 import json
 import time
+import glob
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 from datetime import datetime
@@ -27,27 +28,17 @@ from sklearn.metrics import (
     recall_score,
     f1_score,
     confusion_matrix,
-    classification_report
+    classification_report,
+    roc_auc_score
 )
 
+from ..data.augmentation import mixup_data, mixup_criterion, cutmix_data
+from ..utils.metrics import AverageMeter
+from ..utils.metric_debug import MetricLearningDebugger
+from ..utils.ema import ModelEMA
 
-class AverageMeter:
-    """计算和存储平均值"""
-    
-    def __init__(self):
-        self.reset()
-    
-    def reset(self):
-        self.val = 0
-        self.avg = 0
-        self.sum = 0
-        self.count = 0
-    
-    def update(self, val: float, n: int = 1):
-        self.val = val
-        self.sum += val * n
-        self.count += n
-        self.avg = self.sum / self.count
+
+
 
 
 class Trainer:
@@ -74,7 +65,12 @@ class Trainer:
         output_dir: str = "./output",
         class_names: Optional[List[str]] = None,
         metric_loss: Optional[nn.Module] = None,
-        metric_loss_weight: float = 0.5
+        metric_loss_weight: float = 0.5,
+        mixup_alpha: float = 0.0,
+        cutmix_alpha: float = 0.0,
+        metric_debug: bool = False,
+        use_ema: bool = False,
+        ema_decay: float = 0.9999
     ):
         self.model = model.to(device)
         self.criterion = criterion
@@ -87,6 +83,23 @@ class Trainer:
         # 度量学习损失
         self.metric_loss = metric_loss
         self.metric_loss_weight = metric_loss_weight
+        
+        # Mixup / CutMix
+        self.mixup_alpha = mixup_alpha
+        self.cutmix_alpha = cutmix_alpha
+        
+        # 度量学习诊断器 (仅在启用度量学习时激活)
+        self.metric_debugger = MetricLearningDebugger(
+            output_dir=str(self.output_dir),
+            log_interval=50,
+            enabled=metric_debug and metric_loss is not None
+        )
+        
+        # EMA
+        self.ema = None
+        if use_ema:
+            self.ema = ModelEMA(model, decay=ema_decay)
+            print(f"  启用 EMA (decay={ema_decay})")
         
         # 创建输出目录
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -150,16 +163,33 @@ class Trainer:
         self.model.train()
         
         loss_meter = AverageMeter()
-        acc_meter = AverageMeter()
+        acc_meter  = AverageMeter()
         
-        start_time = time.time()
+        start_time  = time.time()
         num_batches = len(train_loader)
         
         metric_loss_meter = AverageMeter()
         
+        use_mixup = self.mixup_alpha > 0 or self.cutmix_alpha > 0
+        
         for batch_idx, (images, targets) in enumerate(train_loader):
             images = images.to(self.device, non_blocking=True)
             targets = targets.to(self.device, non_blocking=True)
+            
+            # Mixup / CutMix 数据增强
+            mixed = False
+            if use_mixup:
+                if self.mixup_alpha > 0 and self.cutmix_alpha > 0:
+                    # 两者都启用时随机选一种
+                    if np.random.random() > 0.5:
+                        images, y_a, y_b, lam = mixup_data(images, targets, self.mixup_alpha)
+                    else:
+                        images, y_a, y_b, lam = cutmix_data(images, targets, self.cutmix_alpha)
+                elif self.mixup_alpha > 0:
+                    images, y_a, y_b, lam = mixup_data(images, targets, self.mixup_alpha)
+                else:
+                    images, y_a, y_b, lam = cutmix_data(images, targets, self.cutmix_alpha)
+                mixed = True
             
             # 前向传播
             outputs = self.model(images)
@@ -170,19 +200,39 @@ class Trainer:
             else:
                 logits = outputs
                 features = outputs
+            raise
             
-            loss = self.criterion(logits, targets)
+            if mixed:
+                loss = mixup_criterion(self.criterion, logits, y_a, y_b, lam)
+            else:
+                loss = self.criterion(logits, targets)
             
-            # 度量学习损失
-            if self.metric_loss is not None:
+            # 度量学习损失（混合样本时跳过，因为标签已混合）
+            ml_loss_val = None
+            if self.metric_loss is not None and not mixed:
                 ml_loss = self._compute_metric_loss(logits, features, targets)
                 loss = loss + self.metric_loss_weight * ml_loss
-                metric_loss_meter.update(ml_loss.item(), targets.size(0))
+                ml_loss_val = ml_loss.item()
+                metric_loss_meter.update(ml_loss_val, targets.size(0))
+            
+            # 度量学习诊断回调
+            if self.metric_loss is not None and not mixed:
+                cls_loss_val = (loss.item() - self.metric_loss_weight * ml_loss_val) if ml_loss_val else loss.item()
+                self.metric_debugger.on_batch_end(
+                    epoch=epoch, batch_idx=batch_idx,
+                    features=features.detach(), labels=targets,
+                    cls_loss=cls_loss_val,
+                    metric_loss=ml_loss_val,
+                    metric_module=self.metric_loss)
             
             # 反向传播
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
+            
+            # 更新 EMA
+            if self.ema is not None:
+                self.ema.update(self.model)
             
             # OneCycleLR 需要每 step 调用（而非每 epoch）
             if self.scheduler and isinstance(self.scheduler, torch.optim.lr_scheduler.OneCycleLR):
@@ -190,8 +240,12 @@ class Trainer:
             
             # 计算准确率
             _, predicted = logits.max(1)
-            correct = predicted.eq(targets).sum().item()
             batch_size = targets.size(0)
+            if mixed:
+                # 混合样本时使用加权准确率估计
+                correct = (lam * predicted.eq(y_a).float() + (1 - lam) * predicted.eq(y_b).float()).sum().item()
+            else:
+                correct = predicted.eq(targets).sum().item()
             acc = correct / batch_size
             
             # 更新统计
@@ -311,14 +365,16 @@ class Trainer:
         # 计算整体指标
         accuracy = accuracy_score(all_targets, all_predictions)
         
-        # Top-5 准确率
+        # Top-1 到 Top-5 准确率
         num_classes = all_probs.shape[1]
-        if num_classes >= 5:
-            top5_predictions = np.argsort(all_probs, axis=1)[:, -5:]
-            top5_correct = np.array([t in p for t, p in zip(all_targets, top5_predictions)])
-            top5_accuracy = top5_correct.mean()
-        else:
-            top5_accuracy = accuracy
+        top_k_accuracies = {}
+        for k in range(1, 6):
+            if num_classes >= k:
+                topk_preds = np.argsort(all_probs, axis=1)[:, -k:]
+                topk_correct = np.array([t in p for t, p in zip(all_targets, topk_preds)])
+                top_k_accuracies[f'top{k}_accuracy'] = float(topk_correct.mean())
+            else:
+                top_k_accuracies[f'top{k}_accuracy'] = float(accuracy)
         
         # Macro 和 Weighted 指标
         precision_macro = precision_score(all_targets, all_predictions, average='macro', zero_division=0)
@@ -328,6 +384,32 @@ class Trainer:
         precision_weighted = precision_score(all_targets, all_predictions, average='weighted', zero_division=0)
         recall_weighted = recall_score(all_targets, all_predictions, average='weighted', zero_division=0)
         f1_weighted = f1_score(all_targets, all_predictions, average='weighted', zero_division=0)
+        
+        # 每类 AUC (One-vs-Rest)
+        per_class_auc = {}
+        try:
+            # 构建 one-hot 编码
+            y_true_onehot = np.zeros((len(all_targets), num_classes))
+            for i, t in enumerate(all_targets):
+                y_true_onehot[i, t] = 1
+            
+            # 逐类计算 AUC
+            class_names_list = self.class_names if self.class_names else [str(i) for i in range(num_classes)]
+            for c in range(num_classes):
+                if y_true_onehot[:, c].sum() > 0 and y_true_onehot[:, c].sum() < len(all_targets):
+                    auc_val = roc_auc_score(y_true_onehot[:, c], all_probs[:, c])
+                    class_name = class_names_list[c] if c < len(class_names_list) else str(c)
+                    per_class_auc[class_name] = float(auc_val)
+                else:
+                    class_name = class_names_list[c] if c < len(class_names_list) else str(c)
+                    per_class_auc[class_name] = None  # 该类无正样本或全为正样本
+            
+            # 宏平均 AUC
+            valid_aucs = [v for v in per_class_auc.values() if v is not None]
+            macro_auc = float(np.mean(valid_aucs)) if valid_aucs else 0.0
+        except Exception as e:
+            print(f"  警告: 计算 AUC 失败: {e}")
+            macro_auc = 0.0
         
         # 混淆矩阵
         cm = confusion_matrix(all_targets, all_predictions)
@@ -344,7 +426,13 @@ class Trainer:
         
         results = {
             'accuracy': accuracy,
-            'top5_accuracy': top5_accuracy,
+            'top1_accuracy': top_k_accuracies['top1_accuracy'],
+            'top2_accuracy': top_k_accuracies['top2_accuracy'],
+            'top3_accuracy': top_k_accuracies['top3_accuracy'],
+            'top4_accuracy': top_k_accuracies['top4_accuracy'],
+            'top5_accuracy': top_k_accuracies['top5_accuracy'],
+            'macro_auc': macro_auc,
+            'per_class_auc': per_class_auc,
             'precision_macro': precision_macro,
             'recall_macro': recall_macro,
             'f1_macro': f1_macro,
@@ -354,7 +442,9 @@ class Trainer:
             'confusion_matrix': cm.tolist(),
             'classification_report': report,
             'num_samples': len(all_targets),
-            'num_classes': num_classes
+            'num_classes': num_classes,
+            'all_probs': all_probs.tolist(),
+            'all_targets': all_targets.tolist()
         }
         
         # 保存混淆矩阵图
@@ -476,8 +566,12 @@ class Trainer:
                   f"Acc: {train_metrics['accuracy']:.4f}, "
                   f"Time: {train_metrics['time']:.1f}s")
             
-            # 验证
+            # 验证（EMA 启用时使用 EMA 参数）
+            if self.ema is not None:
+                self.ema.apply_shadow(self.model)
             valid_metrics = self.validate(valid_loader)
+            if self.ema is not None:
+                self.ema.restore(self.model)
             print(f"验证 - Loss: {valid_metrics['loss']:.4f}, "
                   f"Acc: {valid_metrics['accuracy']:.4f}, "
                   f"F1: {valid_metrics['f1']:.4f}")
@@ -511,6 +605,9 @@ class Trainer:
             # 保存每个 epoch 的 checkpoint
             self.save_checkpoint(f'checkpoint_epoch_{epoch}.pth', epoch, valid_metrics)
             
+            # 度量学习诊断 epoch 报告
+            self.metric_debugger.on_epoch_end(epoch, self.model, self.metric_loss)
+            
             print()
             
             # 早停检查
@@ -528,6 +625,9 @@ class Trainer:
         
         # 保存训练日志
         self.save_training_log()
+        
+        # 保存度量学习诊断报告
+        self.metric_debugger.save_report()
         
         # 清理非最佳 checkpoint
         self._cleanup_checkpoints()
@@ -560,7 +660,6 @@ class Trainer:
         
         支持预训练+微调场景：当分类头尺寸不匹配时，自动跳过分类头权重
         """
-        from pathlib import Path
         
         # 支持绝对路径和相对路径
         filepath = Path(filename)
@@ -621,7 +720,6 @@ class Trainer:
     
     def _cleanup_checkpoints(self) -> None:
         """清理非最佳 checkpoint，只保留 best_model.pth"""
-        import glob
         
         # 查找所有 checkpoint_epoch_*.pth 文件
         pattern = str(self.output_dir / 'checkpoint_epoch_*.pth')
@@ -670,10 +768,15 @@ def print_test_results(results: Dict[str, Any]) -> None:
     print(f"样本数: {results['num_samples']}")
     print(f"类别数: {results['num_classes']}")
     print()
-    print("整体指标:")
-    print(f"  Top-1 Accuracy: {results['accuracy']:.4f}")
-    print(f"  Top-5 Accuracy: {results['top5_accuracy']:.4f}")
+    print("Top-K 准确率:")
+    for k in range(1, 6):
+        key = f'top{k}_accuracy'
+        if key in results:
+            print(f"  Top-{k} Accuracy: {results[key]:.4f}")
     print()
+    if 'macro_auc' in results:
+        print(f"Macro AUC: {results['macro_auc']:.4f}")
+        print()
     print("Macro 平均:")
     print(f"  Precision: {results['precision_macro']:.4f}")
     print(f"  Recall:    {results['recall_macro']:.4f}")
@@ -683,4 +786,13 @@ def print_test_results(results: Dict[str, Any]) -> None:
     print(f"  Precision: {results['precision_weighted']:.4f}")
     print(f"  Recall:    {results['recall_weighted']:.4f}")
     print(f"  F1-Score:  {results['f1_weighted']:.4f}")
+    print()
+    # 每类 AUC
+    if 'per_class_auc' in results and results['per_class_auc']:
+        print("每类 AUC:")
+        for class_name, auc_val in results['per_class_auc'].items():
+            if auc_val is not None:
+                print(f"  {class_name}: {auc_val:.4f}")
+            else:
+                print(f"  {class_name}: N/A (样本不足)")
     print("=" * 60)

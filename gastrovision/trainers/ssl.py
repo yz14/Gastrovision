@@ -18,7 +18,12 @@ from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler
 from tqdm import tqdm
 
-from ssl_methods.base import SSLMethod
+# SSLMethod 基类可能不可用（位于 experiments 目录），使用 nn.Module 替代
+try:
+    from experiments.ssl_methods.base import SSLMethod
+except ImportError:
+    # 如果 ssl_methods 不可用，SSLTrainer 接受任何 nn.Module
+    SSLMethod = nn.Module
 
 
 class SSLTrainer:

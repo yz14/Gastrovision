@@ -27,3 +27,8 @@ from .metric_learning import (
     CircleLossClassLevel,
     create_metric_loss
 )
+from .loss_factory import (
+    create_loss_function,
+    create_metric_loss_function,
+    get_samples_per_class
+)

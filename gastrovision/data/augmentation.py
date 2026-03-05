@@ -307,49 +307,42 @@ def tta_predict(
     
     predictions = []
     
+    def _get_logits(output):
+        """处理模型输出，提取 logits（兼容 tuple 和 tensor 输出）"""
+        return output[0] if isinstance(output, tuple) else output
+    
     with torch.no_grad():
         # 原始图像
-        pred = model(images)
+        pred = _get_logits(model(images))
         predictions.append(pred)
         
         # 水平翻转
         if num_augments >= 2:
             flipped = torch.flip(images, dims=[3])
-            pred = model(flipped)
+            pred = _get_logits(model(flipped))
             predictions.append(pred)
         
         # 垂直翻转
         if num_augments >= 3:
             flipped = torch.flip(images, dims=[2])
-            pred = model(flipped)
+            pred = _get_logits(model(flipped))
             predictions.append(pred)
         
         # 旋转 90 度
         if num_augments >= 4:
             rotated = torch.rot90(images, k=1, dims=[2, 3])
-            pred = model(rotated)
+            pred = _get_logits(model(rotated))
             predictions.append(pred)
         
         # 旋转 270 度
         if num_augments >= 5:
             rotated = torch.rot90(images, k=3, dims=[2, 3])
-            pred = model(rotated)
+            pred = _get_logits(model(rotated))
             predictions.append(pred)
     
     # 取平均
     avg_pred = torch.stack(predictions).mean(dim=0)
     return avg_pred
-
-
-# =============================================================================
-# 向后兼容：从 losses.py 导入（将在未来版本移除）
-# =============================================================================
-
-# 保持向后兼容，但建议直接从 losses.py 导入
-try:
-    from losses import LabelSmoothingCrossEntropy, FocalLoss, ClassBalancedLoss
-except ImportError:
-    pass
 
 
 # =============================================================================

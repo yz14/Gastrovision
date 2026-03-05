@@ -796,25 +796,29 @@ def create_metric_loss(
     elif loss_type == 'cosface':
         assert num_classes > 0 and embedding_dim > 0, \
             "CosFaceLoss 需要 num_classes 和 embedding_dim"
+        # CosFace 仅使用 m3 (cosine margin)，用户的 --metric_loss_margin 应映射到 m3
+        m3_val = kwargs.get('margin', 0.35)
         return ArcFaceLoss(
             num_classes=num_classes,
             embedding_dim=embedding_dim,
             scale=kwargs.get('scale', 30.0),
-            margin=kwargs.get('margin', 0.35),
+            margin=0.0,  # m2 (ArcFace angular margin) 不用于 CosFace
             margin_type='cosface',
-            m3=kwargs.get('m3', 0.35)
+            m3=m3_val
         )
     
     elif loss_type == 'sphereface':
         assert num_classes > 0 and embedding_dim > 0, \
             "SphereFaceLoss 需要 num_classes 和 embedding_dim"
+        # SphereFace 仅使用 m1 (角度乘数)，用户的 --metric_loss_margin 应映射到 m1
+        m1_val = kwargs.get('margin', 4.0)
         return ArcFaceLoss(
             num_classes=num_classes,
             embedding_dim=embedding_dim,
             scale=kwargs.get('scale', 30.0),
-            margin=0.0,
+            margin=0.0,  # m2 (ArcFace angular margin) 不用于 SphereFace
             margin_type='sphereface',
-            m1=kwargs.get('m1', 4.0)
+            m1=m1_val
         )
     
     elif loss_type == 'circle':

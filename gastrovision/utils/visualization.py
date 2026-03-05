@@ -170,19 +170,50 @@ def plot_confusion_matrix(
     class_indices = [str(i) for i in range(num_classes)]
     
     # 使用热力图
-    show_annot = num_classes <= 20
-    fmt = '.2f' if normalize else 'd'
+    show_annot = num_classes <= 30
     
-    sns.heatmap(
-        cm_normalized,
-        annot=show_annot,
-        fmt=fmt,
-        cmap='Blues',
-        xticklabels=class_indices if num_classes <= 30 else False,
-        yticklabels=class_indices if num_classes <= 30 else False,
-        ax=ax,
-        cbar_kws={'label': 'Recall' if normalize else 'Count'}
-    )
+    if normalize:
+        # 归一化模式：在非零单元格同时显示比例和原始计数
+        annot_array = np.empty_like(cm_normalized, dtype=object)
+        for i in range(num_classes):
+            for j in range(num_classes):
+                count = int(confusion_matrix[i, j])
+                val = cm_normalized[i, j]
+                if count > 0:
+                    annot_array[i, j] = f'{val:.2f}\n({count})'
+                else:
+                    annot_array[i, j] = ''
+        
+        sns.heatmap(
+            cm_normalized,
+            annot=annot_array if show_annot else False,
+            fmt='',
+            cmap='Blues',
+            xticklabels=class_indices if num_classes <= 30 else False,
+            yticklabels=class_indices if num_classes <= 30 else False,
+            ax=ax,
+            cbar_kws={'label': 'Recall'},
+            annot_kws={'fontsize': 7}
+        )
+    else:
+        # 计数模式：显示非零计数
+        annot_array = np.empty_like(cm_normalized, dtype=object)
+        for i in range(num_classes):
+            for j in range(num_classes):
+                count = int(cm_normalized[i, j])
+                annot_array[i, j] = str(count) if count > 0 else ''
+        
+        sns.heatmap(
+            cm_normalized,
+            annot=annot_array if show_annot else False,
+            fmt='',
+            cmap='Blues',
+            xticklabels=class_indices if num_classes <= 30 else False,
+            yticklabels=class_indices if num_classes <= 30 else False,
+            ax=ax,
+            cbar_kws={'label': 'Count'},
+            annot_kws={'fontsize': 8}
+        )
     
     ax.set_xlabel('Predicted Label (Index)', fontsize=12)
     ax.set_ylabel('True Label (Index)', fontsize=12)
@@ -359,25 +390,44 @@ def create_test_results_summary(
             output_path=str(output_dir / 'per_class_metrics.png')
         )
     
-    # 3. 整体指标摘要图
-    fig, ax = plt.subplots(figsize=(10, 6))
+    # 3. 每类 AUC 曲线
+    if 'all_probs' in results and 'all_targets' in results:
+        plot_per_class_auc_curves(
+            all_targets=results['all_targets'],
+            all_probs=results['all_probs'],
+            class_names=class_names,
+            output_path=str(output_dir / 'per_class_auc_curves.png')
+        )
     
-    metrics = {
-        'Top-1 Accuracy': results.get('accuracy', 0),
-        'Top-5 Accuracy': results.get('top5_accuracy', 0),
+    # 4. 整体指标摘要图
+    fig, ax = plt.subplots(figsize=(10, 8))
+    
+    metrics = {}
+    # Top-K 准确率
+    for k in range(1, 6):
+        key = f'top{k}_accuracy'
+        if key in results:
+            metrics[f'Top-{k} Accuracy'] = results[key]
+    # AUC
+    if 'macro_auc' in results:
+        metrics['Macro AUC'] = results['macro_auc']
+    # 其它指标
+    metrics.update({
         'Precision (Macro)': results.get('precision_macro', 0),
         'Recall (Macro)': results.get('recall_macro', 0),
         'F1 (Macro)': results.get('f1_macro', 0),
         'Precision (Weighted)': results.get('precision_weighted', 0),
         'Recall (Weighted)': results.get('recall_weighted', 0),
         'F1 (Weighted)': results.get('f1_weighted', 0),
-    }
+    })
     
     names = list(metrics.keys())
     values = list(metrics.values())
     
-    colors = ['#3498db', '#2ecc71', '#e74c3c', '#f39c12', '#9b59b6',
-              '#1abc9c', '#e67e22', '#34495e']
+    colors_palette = ['#3498db', '#2980b9', '#2471a3', '#1f618d', '#1a5276',
+                      '#27ae60', '#e74c3c', '#f39c12', '#9b59b6',
+                      '#1abc9c', '#e67e22', '#34495e']
+    colors = colors_palette[:len(names)]
     
     bars = ax.barh(names, values, color=colors, alpha=0.8)
     
@@ -399,16 +449,113 @@ def create_test_results_summary(
     print(f"✓ 测试结果汇总已保存到: {output_dir / 'test_summary.png'}")
 
 
+def plot_per_class_auc_curves(
+    all_targets: list,
+    all_probs: list,
+    class_names: List[str] = None,
+    output_path: str = None,
+    figsize_per_subplot: Tuple[float, float] = (3.5, 3.0)
+) -> None:
+    """
+    绘制每个类别的 ROC-AUC 曲线（MxN 子图布局）
+    
+    Args:
+        all_targets: 真实标签列表 (N,)
+        all_probs: 预测概率矩阵 (N, num_classes)
+        class_names: 类别名称列表
+        output_path: 输出路径
+        figsize_per_subplot: 每个子图的大小
+    """
+    from sklearn.metrics import roc_curve, auc
+    
+    all_targets = np.array(all_targets)
+    all_probs = np.array(all_probs)
+    num_classes = all_probs.shape[1]
+    
+    if class_names is None:
+        class_names = [str(i) for i in range(num_classes)]
+    
+    # 构建 one-hot
+    y_true_onehot = np.zeros((len(all_targets), num_classes))
+    for i, t in enumerate(all_targets):
+        y_true_onehot[i, t] = 1
+    
+    # 计算 MxN 布局
+    ncols = min(5, num_classes)
+    nrows = (num_classes + ncols - 1) // ncols
+    
+    fig_w = figsize_per_subplot[0] * ncols
+    fig_h = figsize_per_subplot[1] * nrows
+    fig, axes = plt.subplots(nrows, ncols, figsize=(fig_w, fig_h))
+    
+    # 确保 axes 是 2D 数组
+    if nrows == 1 and ncols == 1:
+        axes = np.array([[axes]])
+    elif nrows == 1:
+        axes = axes[np.newaxis, :]
+    elif ncols == 1:
+        axes = axes[:, np.newaxis]
+    
+    for c in range(num_classes):
+        row, col = divmod(c, ncols)
+        ax = axes[row, col]
+        
+        y_true_c = y_true_onehot[:, c]
+        y_score_c = all_probs[:, c]
+        
+        # 需要至少有正样本和负样本
+        if y_true_c.sum() > 0 and y_true_c.sum() < len(all_targets):
+            fpr, tpr, _ = roc_curve(y_true_c, y_score_c)
+            roc_auc = auc(fpr, tpr)
+            
+            ax.plot(fpr, tpr, color='#3498db', linewidth=2, label=f'AUC={roc_auc:.3f}')
+            ax.plot([0, 1], [0, 1], 'k--', alpha=0.3, linewidth=1)
+            ax.fill_between(fpr, tpr, alpha=0.1, color='#3498db')
+        else:
+            ax.text(0.5, 0.5, 'N/A', ha='center', va='center', fontsize=12, color='gray',
+                    transform=ax.transAxes)
+            roc_auc = None
+        
+        # 截短标题
+        display_name = class_names[c] if c < len(class_names) else str(c)
+        if len(display_name) > 20:
+            display_name = display_name[:17] + '...'
+        ax.set_title(f'{c}: {display_name}', fontsize=8, fontweight='bold')
+        ax.set_xlim([-0.02, 1.02])
+        ax.set_ylim([-0.02, 1.02])
+        ax.legend(loc='lower right', fontsize=7)
+        ax.tick_params(labelsize=6)
+        
+        if row == nrows - 1:
+            ax.set_xlabel('FPR', fontsize=8)
+        if col == 0:
+            ax.set_ylabel('TPR', fontsize=8)
+    
+    # 隐藏多余子图
+    for c in range(num_classes, nrows * ncols):
+        row, col = divmod(c, ncols)
+        axes[row, col].set_visible(False)
+    
+    fig.suptitle('Per-Class ROC Curves (One-vs-Rest)', fontsize=14, fontweight='bold', y=1.01)
+    plt.tight_layout()
+    
+    if output_path:
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        print(f'✓ 每类 AUC 曲线已保存到: {output_path}')
+    
+    plt.close()
+
+
 # 命令行入口
 if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="可视化训练和测试结果")
-    parser.add_argument("--log", type=str, default="D:/codes/work-projects/Gastrovision_results/convnext_tiny/training_log.json",
+    parser.add_argument("--log", type=str, default="D:/codes/work-projects/Gastrovision_results/res50_kvasir_contrastive/training_log.json",
                         help="训练日志路径")
-    parser.add_argument("--results", type=str, default="D:/codes/work-projects/Gastrovision_results/convnext_tiny/test_results.json",
+    parser.add_argument("--results", type=str, default="D:/codes/work-projects/Gastrovision_results/res50_kvasir_contrastive/test_results.json",
                         help="测试结果路径")
-    parser.add_argument("--output", type=str, default='D:/codes/work-projects/Gastrovision_results/convnext_tiny',
+    parser.add_argument("--output", type=str, default='D:/codes/work-projects/Gastrovision_results/res50_kvasir_contrastive',
                         help="输出目录")
     parser.add_argument("--class_names", type=str, default="./class_names.txt",
                         help="类别名称文件路径")

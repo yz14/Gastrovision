@@ -70,10 +70,13 @@ def main():
     print(f"\n创建模型: {cfg.model}")
     weights_to_load = cfg.weights_path if cfg.weights_path else None
     use_pretrained  = cfg.pretrained
+    # resume 时从 checkpoint 加载完整权重（含分类头），不替换分类头
+    replace_head    = True
 
     if cfg.resume:
         weights_to_load = cfg.resume
         use_pretrained  = False
+        replace_head    = False  # checkpoint 中已有完整分类头权重，不能覆盖
         print(f"  从 checkpoint 加载权重: {cfg.resume}")
 
     classifier_head    = getattr(cfg, 'classifier_head', 'linear')
@@ -86,7 +89,8 @@ def main():
         weights_path=weights_to_load,
         freeze_backbone=cfg.freeze_backbone,
         classifier_head=classifier_head,
-        classifier_dropout=classifier_dropout)
+        classifier_dropout=classifier_dropout,
+        replace_head=replace_head)
     model = model.to(device)
 
     # ---- 数据 ----
@@ -151,8 +155,11 @@ def main():
         ema_decay=ema_decay)
 
     # ---- 恢复训练 ----
+    # 注意: test_only 模式下，模型权重已由 get_model(replace_head=False) 正确加载，
+    #       无需再调用 trainer.load_checkpoint（否则会重复加载）。
+    # 训练恢复模式下，trainer.load_checkpoint 用于恢复 optimizer / scheduler 状态。
     if cfg.resume and not cfg.test_only:
-        print(f"从 checkpoint 恢复: {cfg.resume}")
+        print(f"从 checkpoint 恢复训练状态（optimizer/scheduler）: {cfg.resume}")
         trainer.load_checkpoint(cfg.resume)
 
     # ---- 测试模式 ----

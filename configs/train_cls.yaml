@@ -18,7 +18,7 @@ model: "resnet50"          # 可选: resnet18/34/50/101/152, resnext50/101, wide
                            #       efficientnet_v2_s/m/l,
                            #       swin_t/s/b,
                            #       gastronet_resnet50_dino, gastronet_vit_small
-pretrained: true           # 使用 ImageNet 预训练权重
+pretrained: false           # 使用 ImageNet 预训练权重
 weights_path: ""           # 本地预训练权重路径 (为空则使用官方权重)
 freeze_backbone: false     # 冻结 backbone，只训练分类头 (用于 linear probing)
 
@@ -87,6 +87,6 @@ tta_level: "medium"        # TTA 级别: light (2 views) / medium (4 views) / he
 metric_debug: false        # 启用度量学习诊断 (特征范数/类间距离/梯度/损失平衡监控)
 
 # ---- 运行模式 ----
-test_only: false           # 只进行测试 (需配合 resume 指定 checkpoint)
-resume: ""                 # 从 checkpoint 恢复训练的路径 (为空=从头训练)
+test_only: true           # 只进行测试 (需配合 resume 指定 checkpoint)
+resume: D:/codes/work-projects/Gastrovision_results/res50_kvasir/best_model.pth                 # 从 checkpoint 恢复训练的路径 (为空=从头训练)
 visualize: true            # 训练后生成可视化图表

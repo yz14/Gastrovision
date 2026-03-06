@@ -200,7 +200,6 @@ class Trainer:
             else:
                 logits = outputs
                 features = outputs
-            raise
             
             if mixed:
                 loss = mixup_criterion(self.criterion, logits, y_a, y_b, lam)

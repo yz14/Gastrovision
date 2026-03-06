@@ -98,9 +98,10 @@ def get_albumentations_transforms(
                 ], p=0.2),
                 # Cutout 效果
                 A.CoarseDropout(
-                    max_holes=12, max_height=20, max_width=20,
-                    min_holes=4, min_height=8, min_width=8, p=0.4
-                ),
+                    num_holes_range=(4, 12),
+                    hole_height_range=(8, 20),
+                    hole_width_range=(8, 20),
+                    p=0.4),
                 A.Normalize(mean=mean, std=std),
                 ToTensorV2(),
             ])
@@ -125,9 +126,10 @@ def get_albumentations_transforms(
                 ),
                 # Cutout 效果
                 A.CoarseDropout(
-                    max_holes=8, max_height=16, max_width=16,
-                    min_holes=1, min_height=4, min_width=4, p=0.3
-                ),
+                    num_holes_range=(1, 8),
+                    hole_height_range=(4, 16),
+                    hole_width_range=(4, 16),
+                    p=0.3),
                 A.Normalize(mean=mean, std=std),
                 ToTensorV2(),
             ])

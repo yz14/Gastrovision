@@ -92,29 +92,64 @@ class MetricLearningWrapper(nn.Module):
     
     @property
     def feature_dim(self) -> int:
-        """获取 backbone 特征维度（首次前向传播后可用）"""
+        """获取 backbone 特征维度（首次前向传播后可用）
+
+        对于 Linear head:    feature_dim = head.in_features
+        对于 MLP head (Sequential): feature_dim = 第一个 Linear 层的 in_features
+                                    （即 backbone avgpool 的输出维度）
+        """
         if self._feature_dim is not None:
             return self._feature_dim
-        
-        # 尝试从 fc 层推断
-        if hasattr(self.model, 'fc') and hasattr(self.model.fc, 'in_features'):
-            self._feature_dim = self.model.fc.in_features
-            return self._feature_dim
-        if hasattr(self.model, 'head') and hasattr(self.model.head, 'in_features'):
-            self._feature_dim = self.model.head.in_features
-            return self._feature_dim
+
+        def _first_linear_in_features(module: nn.Module) -> int:
+            """从模块或 Sequential 中提取第一个 Linear 层的 in_features。"""
+            if hasattr(module, 'in_features'):
+                # 单层 Linear
+                return module.in_features
+            if hasattr(module, '__iter__'):
+                # Sequential / ModuleList：取第一个 Linear 层
+                for layer in module:
+                    if hasattr(layer, 'in_features'):
+                        return layer.in_features
+            return None
+
+        # ResNet / ResNeXt / Wide ResNet: fc
+        if hasattr(self.model, 'fc'):
+            dim = _first_linear_in_features(self.model.fc)
+            if dim is not None:
+                self._feature_dim = dim
+                return self._feature_dim
+
+        # Swin Transformer: head
+        if hasattr(self.model, 'head'):
+            dim = _first_linear_in_features(self.model.head)
+            if dim is not None:
+                self._feature_dim = dim
+                return self._feature_dim
+
+        # ConvNeXt / EfficientNet: classifier
         if hasattr(self.model, 'classifier'):
             clf = self.model.classifier
             if hasattr(clf, '__getitem__'):
+                # Sequential classifier（ConvNeXt 等）
+                # ConvNeXt 的 classifier = Sequential(LayerNorm, Flatten, Linear)
+                # EfficientNet 的 classifier = Sequential(Dropout, Linear)
+                # 我们要的是 backbone 特征维度 = 最后一个 Linear 的 in_features
                 for layer in reversed(list(clf)):
                     if hasattr(layer, 'in_features'):
                         self._feature_dim = layer.in_features
                         return self._feature_dim
-            elif hasattr(clf, 'in_features'):
-                self._feature_dim = clf.in_features
-                return self._feature_dim
-        
-        raise RuntimeError("无法推断 feature_dim，请先执行一次前向传播")
+            else:
+                dim = _first_linear_in_features(clf)
+                if dim is not None:
+                    self._feature_dim = dim
+                    return self._feature_dim
+
+        raise RuntimeError(
+            "无法推断 feature_dim，请先执行一次前向传播。\n"
+            "这通常发生在自定义分类头不包含 Linear 层时。"
+        )
+
     
     def forward(self, x: torch.Tensor) -> tuple:
         """

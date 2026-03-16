@@ -32,3 +32,4 @@ from .loss_factory import (
     create_metric_loss_function,
     get_samples_per_class
 )
+from .whale_losses import WhaleCompositeLoss, TripletLoss as WhaleTripletLoss

@@ -35,4 +35,4 @@
 
 # TODO   
 
-1. 我测试了train_cls.py的推理，发现了重大问题，pretrain是导入公开的自然图像权重，而resume是断点续训和推理使用，为什么都要替换head，这导致使用train_cls单独进行推理时指标很差。除了我发现的这个问题外，是否还有其它的问题，需要非常细致，认真的全流程代码审查。修改不要代入新的bug，不要影响到其它代码，例如影响到原先的训练代码。  
+1. D:\codes\work-projects\Gastrovision_models\train_cls.py这是我训练内镜分类的代码。目前看起来都正常。D:\codes\work-projects\colonnav_ssl\train_whale.py这个是我训练和推理鲸鱼分类的代码，并进行提交kaggle的代码。我现在需要测试内镜分类的各种损失，所以我打算在内镜分类中增加鲸鱼分类的训练和推理的代码，并进行提交kaggle。我需要在D:\codes\work-projects\Gastrovision_models这里增加train_whale.py和对应的数据读取，损失就用内镜的分类损失，像D:\codes\work-projects\Gastrovision_models\configs\train_cls.yaml这样可以更换不同损失来测试。鲸鱼的数据有点特殊，需要注意，里面好像要有bbox的信息之类的。鲸鱼数据在本地路径为D:\codes\data\humpback-whale-identification。请你先细致的理解内镜和鲸鱼分类的全过程代码，然后再开始实施。    

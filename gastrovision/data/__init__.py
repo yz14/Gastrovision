@@ -9,3 +9,4 @@ from .dataset import (
     get_class_weights
 )
 from .augmentation import mixup_data, mixup_criterion, cutmix_data, WarmupCosineScheduler
+from .whale_dataset import WhaleDataset, WhaleRandomIdentitySampler

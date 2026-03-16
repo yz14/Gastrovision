@@ -1,0 +1,61 @@
+# ============================================================
+# 鲸鱼分类训练配置
+# ============================================================
+# 用法: python train_whale.py configs/train_whale.yaml
+
+# ---- 数据 ----
+whale_data_dir: "D:/codes/data/humpback-whale-identification"  # 原始数据 (train/, test/, train.csv)
+list_dir: "D:/codes/work-projects/colonnav_ssl/image_list"     # 预处理列表 (train_image_list.txt, val0.txt 等)
+bbox_dir: "D:/codes/work-projects/colonnav_ssl/bbox_model"     # bbox CSV 目录 (se50_bbox.csv, se101_bbox.csv)
+fold_index: 0             # 验证集 fold 索引 (0-4)
+image_h: 256              # 图像高度
+image_w: 512              # 图像宽度 (鲸鱼图像宽>高)
+whale_id_num: 5004        # 鲸鱼个体数 (不含 new_whale)
+is_pseudo: false          # 是否使用伪标签
+NW_ratio: 0.25            # new_whale 在 batch 中的比例
+
+# ---- 模型 ----
+model: "resnet101"        # backbone: resnet50, resnet101, resnet152
+s1: 64.0                  # MarginHead 缩放因子
+m1: 0.5                   # MarginHead 角度间隔
+s2: 16.0                  # BinaryHead 缩放因子
+pretrained: true          # 使用 ImageNet 预训练权重
+freeze_layers:            # 冻结的层 (训练初期冻结浅层)
+  - "layer0"
+  - "layer1"
+
+# ---- 原始三损失组合 (权重=0 表示关闭) ----
+focal_w: 1.0              # focal_OHEM 损失权重 (BinaryHead)
+softmax_w: 0.1            # softmax 损失权重 (MarginHead)
+triplet_w: 1.0            # 原生 TripletLoss 权重
+triplet_margin: 0.3       # Triplet margin (null=SoftMarginLoss)
+
+# ---- Gastrovision 度量学习 (可替换/叠加 triplet) ----
+# 设 metric_loss 为 "none" 则不使用
+# 可选: arcface, cosface, contrastive, proxy_anchor, proxy_nca
+metric_loss: "none"
+metric_loss_weight: 0.5
+metric_loss_margin: 0.5
+embedding_dim: 2048       # 特征维度 (与 backbone 输出一致)
+
+# ---- 训练参数 ----
+epochs: 100
+batch_size: 32
+num_instances: 4          # 每个身份的样本数 (用于 Triplet 采样)
+lr: 0.001
+weight_decay: 0.0001
+scheduler: "cosine"       # cosine, step, plateau, onecycle
+warmup_epochs: 5
+early_stopping: 0         # 0=不使用早停
+
+# ---- OHEM 参数 ----
+initial_hard_ratio: 1.0   # 初始 OHEM 比例 (逐步衰减)
+min_hard_ratio: 0.2       # 最小 OHEM 比例
+hard_ratio_step: 0.1      # 每 epoch 衰减步长
+
+# ---- 运行控制 ----
+mode: "train"             # train 或 test (test 下一轮实现)
+pretrained_model: ""      # 预训练模型路径 (续训时使用)
+output_dir: "./output/whale"
+num_workers: 4
+seed: 42

@@ -35,4 +35,4 @@
 
 # TODO   
 
-1. D:\codes\work-projects\Gastrovision_models\train_cls.py这是我训练内镜分类的代码。目前看起来都正常。D:\codes\work-projects\colonnav_ssl\train_whale.py这个是我训练和推理鲸鱼分类的代码，并进行提交kaggle的代码。我现在需要测试内镜分类的各种损失，所以我打算在内镜分类中增加鲸鱼分类的训练和推理的代码，并进行提交kaggle。我需要在D:\codes\work-projects\Gastrovision_models这里增加train_whale.py和对应的数据读取，损失就用内镜的分类损失，像D:\codes\work-projects\Gastrovision_models\configs\train_cls.yaml这样可以更换不同损失来测试。鲸鱼的数据有点特殊，需要注意，里面好像要有bbox的信息之类的。鲸鱼数据在本地路径为D:\codes\data\humpback-whale-identification。请你先细致的理解内镜和鲸鱼分类的全过程代码，然后再开始实施。    
+1. D:\codes\work-projects\Gastrovision_models\train_cls.py这是我训练内镜分类的代码。目前看起来都正常。我打算复用这套方案来解决https://www.kaggle.com/competitions/jaguar-re-id/overview这个kaggle比赛，我需要单独写一个数据读取和训练代码。我数据都在服务器上/data0/yzhen/data/jaguar_reid下面有csv，train和test文件夹。我把csv文件D:\codes\work-projects\Gastrovision_models\data\train.csv放到这里了，还有test.csv和提交的csv样例。请你先理解我内镜的整个代码，再理解kaggle比赛的规则和数据内容，最后再基于内镜方案给出jaguar re id的方案并进行实现。请新建一个jaguar文件夹在里面实现，如果内镜代码可以利用上的则利用，如果有更加好的方案也请加入。如果需要预处理和后处理，请单独写，并独立实施。如果需要数据划分，请注意只需要训练集和验证集即可，因为测试集已经有了，而且验证集里面每个类别至少保证有一个样例。  

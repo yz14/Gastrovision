@@ -20,6 +20,8 @@ s1: 64.0                  # MarginHead 缩放因子
 m1: 0.5                   # MarginHead 角度间隔
 s2: 16.0                  # BinaryHead 缩放因子
 pretrained: true          # 使用 ImageNet 预训练权重
+pretrained_path: ""       # 预训练权重本地路径 (留空=使用 torchvision 默认下载)
+                          # 例: "/data0/yzhen/pretrained/resnet50-0676ba61.pth"
 freeze_layers:            # 冻结的层 (训练初期冻结浅层)
   - "layer0"
   - "layer1"

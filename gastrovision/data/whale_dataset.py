@@ -382,8 +382,10 @@ class WhaleDataset(Dataset):
         # 加载标签字典和 bbox
         label_list_path = os.path.join(list_dir, 'label_list.txt')
         self.label_dict = load_label_dict(label_list_path)
-        self.class_num = len(self.label_dict)
-        self.whale_id_num = self.class_num  # 不含 new_whale 的类别数 (5004)
+        # whale_id_num = 仅已知鲸鱼数量 (排除 new_whale label=-1)
+        # 原始代码中此值硬编码为 5004
+        self.whale_id_num = sum(1 for v in self.label_dict.values() if v >= 0)
+        self.class_num = self.whale_id_num
 
         self.bbox_dict = load_bbox_dict(bbox_dir)
 

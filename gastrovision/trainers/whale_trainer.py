@@ -114,12 +114,12 @@ class WhaleTrainer:
             indexs_NoNew = (truth_NW_binary == 0).nonzero(as_tuple=True)[0]
 
             # one-hot 编码 (用于 focal_OHEM)
-            labels_onehot = torch.FloatTensor(
-                len(truth_), self.num_class).to(self.device)
-            labels_onehot.zero_()
-            # new_whale 标签 = num_class, 超出范围, scatter 会忽略
-            labels_onehot.scatter_(
-                1, truth_.view(-1, 1).clamp(0, self.num_class - 1), 1)
+            # 原始代码: 创建 class_num+1 列, scatter 后截断到 class_num
+            # 这样 new_whale (label=num_class=10008) 落入多出的那列, 截断后自动丢弃
+            labels_onehot = torch.zeros(
+                len(truth_), self.num_class + 1, device=self.device)
+            labels_onehot.scatter_(1, truth_.view(-1, 1), 1)
+            labels_onehot = labels_onehot[:, :self.num_class]
 
             # 前向传播
             # 注意: 原始代码中 is_infer=True, ArcFace margin 仅在 MarginHead 内部

@@ -10,6 +10,7 @@
 原始来源: colonnav_ssl/net/model_resnet101.py + MagrinLinear.py
 """
 
+import os
 import math
 
 import torch
@@ -203,6 +204,7 @@ class WhaleNet(nn.Module):
         m1=0.5,
         s2=16.,
         pretrained=True,
+        pretrained_path='',
         freeze_layers=None
     ):
         super().__init__()
@@ -216,7 +218,17 @@ class WhaleNet(nn.Module):
         model_fn, emb_size = WHALE_BACKBONE_CONFIGS[backbone_name]
 
         # 构建 backbone
-        self.basemodel = model_fn(pretrained=pretrained)
+        if pretrained_path and os.path.exists(pretrained_path):
+            # 从指定路径加载预训练权重
+            print(f"  从本地加载预训练权重: {pretrained_path}")
+            self.basemodel = model_fn(weights=None)
+            state_dict = torch.load(pretrained_path, map_location='cpu', weights_only=True)
+            self.basemodel.load_state_dict(state_dict, strict=False)
+        elif pretrained:
+            print("  使用 torchvision 默认预训练权重")
+            self.basemodel = model_fn(weights='IMAGENET1K_V1')
+        else:
+            self.basemodel = model_fn(weights=None)
         self.basemodel.avgpool = nn.AdaptiveAvgPool2d(1)
         self.basemodel.fc = nn.Sequential()  # 移除原始分类头
 
@@ -318,6 +330,7 @@ def get_whale_model(cfg):
     num_class = whale_id_num * 2  # 翻转后类别翻倍
 
     freeze_layers = getattr(cfg, 'freeze_layers', ['layer0', 'layer1'])
+    pretrained_path = getattr(cfg, 'pretrained_path', '')
 
     model = WhaleNet(
         backbone_name=cfg.model,
@@ -326,6 +339,7 @@ def get_whale_model(cfg):
         m1=cfg.m1,
         s2=cfg.s2,
         pretrained=cfg.pretrained,
+        pretrained_path=pretrained_path,
         freeze_layers=freeze_layers
     )
 

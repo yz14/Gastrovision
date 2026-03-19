@@ -1,0 +1,64 @@
+# ================================================================
+# Jaguar Re-ID 训练配置
+# ================================================================
+#
+# 用法:
+#   python -m jaguar.train configs/jaguar_reid.yaml
+#
+# 服务器数据路径:
+#   /data0/yzhen/data/jaguar_reid/train/  — 训练图片
+#   /data0/yzhen/data/jaguar_reid/test/   — 测试图片
+#   /data0/yzhen/data/jaguar_reid/train.csv
+#   /data0/yzhen/data/jaguar_reid/test.csv
+# ================================================================
+
+# ---- 数据路径 ----
+train_csv: "/data0/yzhen/data/jaguar_reid/train.csv"
+train_image_dir: "/data0/yzhen/data/jaguar_reid/train"
+test_csv: "/data0/yzhen/data/jaguar_reid/test.csv"
+test_image_dir: "/data0/yzhen/data/jaguar_reid/test"
+output_dir: "/data0/yzhen/data/jaguar_reid/output/exp01"
+
+# ---- 数据划分 ----
+val_ratio: 0.15            # 验证集比例
+seed: 42
+
+# ---- 模型 ----
+# 可选: resnet50, resnet101, convnext_tiny/small/base, efficientnet_v2_s/m/l, swin_t/s/b
+backbone: "convnext_base"
+embedding_dim: 512         # 嵌入维度
+pretrained: true           # ImageNet 预训练
+use_gem: true              # GeM Pooling (优于 AvgPool)
+gem_p: 3.0                 # GeM 初始 p 值
+dropout: 0.0               # embedding FC 前的 dropout
+
+# ---- ArcFace ----
+arcface_scale: 30.0        # ArcFace 缩放因子 s
+arcface_margin: 0.5        # ArcFace 角度间隔 m (弧度)
+
+# ---- 训练 ----
+epochs: 80
+batch_size: 32
+lr: 0.0003                 # 学习率 (head + arcface)
+backbone_lr_mult: 0.1      # backbone 学习率乘数 (backbone_lr = lr * mult)
+weight_decay: 0.0001
+optimizer: "adamw"         # adam / adamw / sgd
+scheduler: "warmup_cosine" # step / cosine / plateau / warmup_cosine / none
+warmup_epochs: 5
+early_stopping: 20         # 早停 (0=禁用)
+
+# ---- 图像与增强 ----
+image_size: 384            # 输入图像尺寸 (Re-ID 通常用较大分辨率)
+augment_level: "heavy"     # light / medium / heavy (Re-ID 推荐 heavy)
+num_workers: 4
+
+# ---- EMA ----
+ema: true
+ema_decay: 0.9999
+
+# ---- 推理 ----
+use_flip_tta: true         # 推理时使用水平翻转 TTA
+
+# ---- 运行模式 ----
+test_only: false           # 只推理 (需配合 resume)
+resume: ""                 # 从 checkpoint 恢复

@@ -167,6 +167,7 @@ class ReIDTrainer:
             log_parts.extend([
                 f"val_rank1={val_metrics['rank1']:.4f}",
                 f"val_mAP={val_metrics['mAP']:.4f}",
+                f"val_auc={val_metrics.get('auc', 0):.4f}",
                 f"val_coverage={val_metrics.get('valid_queries', 0)}/{val_metrics.get('total', 0)}",
                 f"time={epoch_time:.1f}s",
             ])
@@ -353,10 +354,33 @@ class ReIDTrainer:
         rank1 = rank1_correct / max(valid_queries, 1)
         mAP = ap_sum / max(valid_queries, 1)
 
+        # ---- Pair-wise AUC (更贴近 Kaggle 评估) ----
+        # 取上三角所有 pair 的相似度和标签
+        triu_indices = torch.triu_indices(N, N, offset=1)
+        pair_sims = sim_matrix[triu_indices[0], triu_indices[1]]
+        pair_labels = (all_labels[triu_indices[0]] == all_labels[triu_indices[1]]).float()
+        # 过滤掉 -inf (对角线已被恢复为有限值前的上三角不含对角线，无需过滤)
+        n_pos = pair_labels.sum().item()
+        n_neg = len(pair_labels) - n_pos
+        if n_pos > 0 and n_neg > 0:
+            # 手动计算 AUC: P(score_pos > score_neg)
+            sorted_idx = pair_sims.argsort(descending=True)
+            sorted_labels = pair_labels[sorted_idx]
+            # 累积正样本数
+            cum_pos = sorted_labels.cumsum(0)
+            # 每个负样本位置，前面有多少正样本
+            neg_mask = (sorted_labels == 0)
+            auc = cum_pos[neg_mask].sum().item() / (n_pos * n_neg)
+        else:
+            auc = 0.0
+
         if self.ema is not None:
             self.ema.restore(model)
 
-        return {'rank1': rank1, 'mAP': mAP, 'valid_queries': valid_queries, 'total': N}
+        return {
+            'rank1': rank1, 'mAP': mAP, 'auc': auc,
+            'valid_queries': valid_queries, 'total': N,
+        }
 
     def _save_checkpoint(self, epoch: int, filename: str, metrics: dict = None):
         """保存 checkpoint"""

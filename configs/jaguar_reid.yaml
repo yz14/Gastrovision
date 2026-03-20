@@ -32,7 +32,7 @@ pretrained_path: "/data0/data/resnet50.pth"        # 本地预训练权重路径
                            # 示例: "/data0/yzhen/pretrained/convnext_base_1k_224_ema.pth"
 use_gem: true              # GeM Pooling (优于 AvgPool)
 gem_p: 3.0                 # GeM 初始 p 值
-dropout: 0.0               # embedding FC 前的 dropout
+dropout: 0.2               # embedding FC 前的 dropout (Re-ID 小数据集推荐 0.2~0.3)
 
 # ---- 损失函数 ----
 # 主损失类型:
@@ -58,10 +58,17 @@ loss_type: "arcface"
 # circle_scale: 256.0      # CircleLoss 缩放因子 γ (默认 256.0)
 # circle_margin: 0.25      # CircleLoss 间隔 m (默认 0.25)
 
+# 标签平滑 (proxy-based 损失的正则化，减少过拟合)
+label_smoothing: 0.1       # 0.0=禁用, 0.1=推荐 (31类小数据集必须启用)
+
 # 辅助损失 (可选, 与主损失组合, 始终作用于 BNNeck 前特征)
-# 推荐: arcface + triplet 是经典 Re-ID 组合
-aux_loss_type: "none"      # triplet / contrastive / circle / lifted / npair / none
-aux_loss_weight: 0.5       # 辅助损失权重 (total_loss = primary + weight * aux)
+# 推荐: arcface + triplet 是 Bag of Tricks (CVPR 2019) 的标准组合
+# triplet 直接优化 raw_feat 的度量空间，这是推理时实际使用的特征
+aux_loss_type: "triplet"   # triplet / contrastive / circle / lifted / npair / none
+aux_loss_weight: 1.0       # 辅助损失权重 (total_loss = primary + weight * aux)
+# PK sampler 参数 (使用 pair-based 损失时自动启用)
+pk_p: 8                    # 每 batch 的类别数
+pk_k: 4                    # 每类别的实例数 (batch_size = p*k = 32)
 # 辅助损失参数同样支持 loss-type-specific 键 (如 aux_triplet_margin: 0.3)
 
 # ---- 训练 ----

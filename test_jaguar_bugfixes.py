@@ -572,6 +572,161 @@ def test_e2e_aux_loss_with_defaults():
 
 
 # ================================================================
+# Session 3: FIX-1 ~ FIX-5 新增测试
+# ================================================================
+
+def test_fix1_pk_sampler_for_aux_pair_loss():
+    """FIX-1: 当辅助损失为 pair-based 时也应使用 PK sampler"""
+    from jaguar.trainer import is_proxy_loss
+
+    # arcface (proxy) + triplet (aux, pair) → 应使用 PK sampler
+    loss_type = 'arcface'
+    aux_loss_type = 'triplet'
+    _has_pair = (
+        not is_proxy_loss(loss_type)
+        or (aux_loss_type and aux_loss_type != 'none' and not is_proxy_loss(aux_loss_type))
+    )
+    assert _has_pair, "arcface + triplet(aux) 应触发 PK sampler"
+
+    # arcface (proxy) + none → 不需要 PK sampler
+    aux_loss_type2 = 'none'
+    _has_pair2 = (
+        not is_proxy_loss(loss_type)
+        or (aux_loss_type2 and aux_loss_type2 != 'none' and not is_proxy_loss(aux_loss_type2))
+    )
+    assert not _has_pair2, "arcface + none 不应触发 PK sampler"
+
+    # triplet (pair) + none → 应使用 PK sampler
+    _has_pair3 = (
+        not is_proxy_loss('triplet')
+        or False
+    )
+    assert _has_pair3, "triplet 主损失应触发 PK sampler"
+
+    print("✓ test_fix1_pk_sampler_for_aux_pair_loss PASSED")
+
+
+def test_fix2_label_smoothing():
+    """FIX-2: ArcFace 应支持 label_smoothing 参数"""
+    from gastrovision.losses.metric_learning import ArcFaceLoss, create_metric_loss
+
+    # 直接构造
+    loss = ArcFaceLoss(num_classes=10, embedding_dim=64, label_smoothing=0.1)
+    assert loss.label_smoothing == 0.1
+
+    # 通过工厂函数
+    loss2 = create_metric_loss('arcface', num_classes=10, embedding_dim=64, label_smoothing=0.15)
+    assert loss2.label_smoothing == 0.15
+
+    # 默认值为 0.0
+    loss3 = create_metric_loss('arcface', num_classes=10, embedding_dim=64)
+    assert loss3.label_smoothing == 0.0
+
+    # 确保 loss 可以正常计算
+    feat = torch.randn(4, 64)
+    labels = torch.tensor([0, 1, 2, 3])
+    val = loss(feat, labels)
+    assert val.item() > 0, "Label smoothing loss should > 0"
+
+    # cosface 和 sphereface 也应支持
+    loss_cf = create_metric_loss('cosface', num_classes=10, embedding_dim=64, label_smoothing=0.1)
+    assert loss_cf.label_smoothing == 0.1
+    loss_sf = create_metric_loss('sphereface', num_classes=10, embedding_dim=64, label_smoothing=0.1)
+    assert loss_sf.label_smoothing == 0.1
+
+    print("✓ test_fix2_label_smoothing PASSED")
+
+
+def test_fix3_validate_returns_auc():
+    """FIX-3: _validate 应返回 pair-wise AUC"""
+    from jaguar.model import ReIDModel
+    from jaguar.trainer import ReIDTrainer
+    from jaguar.train import _create_loss
+
+    device = torch.device('cpu')
+    cfg = SimpleNamespace()
+    model = ReIDModel('resnet18', embedding_dim=128, pretrained=False, use_gem=False)
+    criterion = _create_loss(cfg, 'arcface', num_classes=5, embedding_dim=128)
+
+    all_params = list(model.parameters()) + list(criterion.parameters())
+    optimizer = torch.optim.Adam(all_params, lr=0.001)
+
+    # 创建有 5 个类、每类 4 个样本的数据
+    images = torch.randn(20, 3, 224, 224)
+    labels = torch.tensor([0,0,0,0, 1,1,1,1, 2,2,2,2, 3,3,3,3, 4,4,4,4])
+
+    with tempfile.TemporaryDirectory() as tmp:
+        trainer = ReIDTrainer(
+            model=model, criterion=criterion, loss_type='arcface',
+            optimizer=optimizer, device=device, output_dir=tmp
+        )
+
+        val_loader = torch.utils.data.DataLoader(
+            torch.utils.data.TensorDataset(images, labels), batch_size=20
+        )
+        metrics = trainer._validate(val_loader)
+
+        assert 'auc' in metrics, "验证结果应包含 auc"
+        assert 0.0 <= metrics['auc'] <= 1.0, f"AUC 应在 [0,1], 实际 {metrics['auc']}"
+        assert 'rank1' in metrics
+        assert 'mAP' in metrics
+
+    print("✓ test_fix3_validate_returns_auc PASSED")
+
+
+def test_fix4_config_defaults():
+    """FIX-4: 配置默认值检查 (triplet aux, label_smoothing, dropout)"""
+    from jaguar.train import _create_loss
+
+    # label_smoothing 默认 0.1 (从 _create_loss 内部读取)
+    cfg = SimpleNamespace()
+    loss = _create_loss(cfg, 'arcface', num_classes=10, embedding_dim=64)
+    assert loss.label_smoothing == 0.1, f"默认 label_smoothing 应为 0.1, 实际 {loss.label_smoothing}"
+
+    # 可通过配置覆盖
+    cfg2 = SimpleNamespace(label_smoothing=0.2)
+    loss2 = _create_loss(cfg2, 'arcface', num_classes=10, embedding_dim=64)
+    assert loss2.label_smoothing == 0.2
+
+    print("✓ test_fix4_config_defaults PASSED")
+
+
+def test_fix5_sigmoid_calibration():
+    """FIX-5: 推理相似度应使用 sigmoid 校准而非线性映射"""
+    import numpy as np
+
+    # 模拟: 紧密聚集的余弦相似度 [0.7, 0.95]
+    raw_sims = np.random.uniform(0.7, 0.95, size=1000)
+
+    # 旧方法: (sim + 1) / 2
+    old_mapped = (raw_sims + 1.0) / 2.0
+    old_range = old_mapped.max() - old_mapped.min()
+
+    # 新方法: sigmoid 校准
+    median = np.median(raw_sims)
+    q75, q25 = np.percentile(raw_sims, [75, 25])
+    iqr = max(q75 - q25, 1e-6)
+    z = (raw_sims - median) / (iqr * 0.7413)
+    new_mapped = 1.0 / (1.0 + np.exp(-z))
+    new_range = new_mapped.max() - new_mapped.min()
+
+    # 新方法应有更好的动态范围
+    assert new_range > old_range, \
+        f"Sigmoid 校准范围 ({new_range:.3f}) 应大于线性映射 ({old_range:.3f})"
+
+    # 新方法应以 0.5 为中心分布
+    assert 0.3 < np.mean(new_mapped) < 0.7, \
+        f"Sigmoid 校准均值应接近 0.5, 实际 {np.mean(new_mapped):.3f}"
+
+    # 排序应保持一致 (单调变换)
+    old_order = np.argsort(raw_sims)
+    new_order = np.argsort(new_mapped)
+    assert np.array_equal(old_order, new_order), "Sigmoid 校准应保持排序不变"
+
+    print("✓ test_fix5_sigmoid_calibration PASSED")
+
+
+# ================================================================
 # 运行所有测试
 # ================================================================
 
@@ -602,6 +757,12 @@ if __name__ == '__main__':
         test_e2e_loss_switching_with_defaults,
         test_e2e_pk_sampler_with_dataloader,
         test_e2e_aux_loss_with_defaults,
+        # Session 3: FIX-1 ~ FIX-5
+        test_fix1_pk_sampler_for_aux_pair_loss,
+        test_fix2_label_smoothing,
+        test_fix3_validate_returns_auc,
+        test_fix4_config_defaults,
+        test_fix5_sigmoid_calibration,
     ]
 
     passed = 0

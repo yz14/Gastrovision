@@ -118,16 +118,23 @@ def predict_similarity(
 
         # 余弦相似度 (已归一化, 所以直接点积)
         sim = torch.dot(q_emb, g_emb).item()
-        # 映射到 [0, 1]（余弦相似度范围 [-1, 1]）
-        sim = (sim + 1.0) / 2.0
         similarities.append(sim)
 
     if missing:
         print(f"[警告] {len(missing)} 张图片缺少 embedding")
 
+    # 自适应 sigmoid 校准
+    sims_arr = np.array(similarities)
+    median = np.median(sims_arr)
+    q75, q25 = np.percentile(sims_arr, [75, 25])
+    iqr = max(q75 - q25, 1e-6)
+    z = (sims_arr - median) / (iqr * 0.7413)
+    calibrated = 1.0 / (1.0 + np.exp(-z))
+    print(f"校准参数: median={median:.4f}, IQR={iqr:.4f}")
+
     submission = pd.DataFrame({
         'row_id': test_df['row_id'],
-        'similarity': similarities
+        'similarity': calibrated
     })
 
     if output_path:
@@ -185,9 +192,17 @@ def predict_similarity_fast(
     g_embs = emb_matrix[gallery_indices]  # (N_pairs, D)
     sims = (q_embs * g_embs).sum(dim=1)  # (N_pairs,)
 
-    # 映射到 [0, 1]
-    sims = (sims + 1.0) / 2.0
-    sims = sims.numpy()
+    # 自适应 sigmoid 校准: 将余弦相似度映射到 [0, 1]
+    # 基于分布统计（中位数 + IQR）进行归一化后过 sigmoid
+    # 比 (sim+1)/2 的线性映射区分度更好
+    sims_np = sims.numpy()
+    median = np.median(sims_np)
+    q75, q25 = np.percentile(sims_np, [75, 25])
+    iqr = max(q75 - q25, 1e-6)
+    # 标准化到 ~N(0,1) 然后 sigmoid
+    z = (sims_np - median) / (iqr * 0.7413)  # IQR-based robust z-score
+    sims = 1.0 / (1.0 + np.exp(-z))  # sigmoid → [0, 1]
+    print(f"校准参数: median={median:.4f}, IQR={iqr:.4f}")
 
     submission = pd.DataFrame({
         'row_id': test_df['row_id'],

@@ -79,6 +79,7 @@ def _create_loss(cfg, loss_type: str, num_classes: int, embedding_dim: int, pref
     # 回退到 LOSS_DEFAULTS 中的合理默认值
     scale = getattr(cfg, f'{prefix}{lt}_scale', defaults['scale'])
     margin = getattr(cfg, f'{prefix}{lt}_margin', defaults['margin'])
+    label_smoothing = getattr(cfg, 'label_smoothing', 0.1)
 
     print(f"  [{prefix or 'primary'}] {loss_type}: scale={scale}, margin={margin}")
 
@@ -89,6 +90,7 @@ def _create_loss(cfg, loss_type: str, num_classes: int, embedding_dim: int, pref
         embedding_dim=embedding_dim,
         scale=scale,
         margin=margin,
+        label_smoothing=label_smoothing,
     )
 
     return loss
@@ -168,9 +170,14 @@ def main():
 
     # ---- DataLoader ----
     # Pair-based 损失需要 PK sampler 确保每个 batch 有足够正样本对
-    # Proxy-based 损失使用普通 shuffle 即可
+    # 如果主损失或辅助损失中有 pair-based，都需要 PK sampler
     loss_type = getattr(cfg, 'loss_type', 'arcface')
-    use_pk_sampler = not is_proxy_loss(loss_type)
+    aux_loss_type = getattr(cfg, 'aux_loss_type', 'none')
+    _has_pair_loss = (
+        not is_proxy_loss(loss_type)
+        or (aux_loss_type and aux_loss_type != 'none' and not is_proxy_loss(aux_loss_type))
+    )
+    use_pk_sampler = _has_pair_loss
 
     if use_pk_sampler:
         pk_p = getattr(cfg, 'pk_p', 8)   # 每 batch 的类别数

@@ -469,7 +469,8 @@ class ArcFaceLoss(nn.Module):
         easy_margin: bool = False,
         margin_type: str = 'arcface',
         m1: float = 1.0,
-        m3: float = 0.0
+        m3: float = 0.0,
+        label_smoothing: float = 0.0
     ):
         super().__init__()
         self.num_classes = num_classes
@@ -480,6 +481,7 @@ class ArcFaceLoss(nn.Module):
         self.margin_type = margin_type
         self.m1 = m1
         self.m3 = m3
+        self.label_smoothing = label_smoothing
         
         # 可学习的类别权重（相当于分类头的权重）
         self.weight = nn.Parameter(torch.FloatTensor(num_classes, embedding_dim))
@@ -543,7 +545,7 @@ class ArcFaceLoss(nn.Module):
         logits = one_hot * phi + (1.0 - one_hot) * cosine
         logits = logits * self.scale
         
-        loss = F.cross_entropy(logits, labels)
+        loss = F.cross_entropy(logits, labels, label_smoothing=self.label_smoothing)
         return loss
 
 
@@ -790,7 +792,8 @@ def create_metric_loss(
             scale=kwargs.get('scale', 30.0),
             margin=kwargs.get('margin', 0.5),
             easy_margin=kwargs.get('easy_margin', False),
-            margin_type='arcface'
+            margin_type='arcface',
+            label_smoothing=kwargs.get('label_smoothing', 0.0)
         )
     
     elif loss_type == 'cosface':
@@ -804,7 +807,8 @@ def create_metric_loss(
             scale=kwargs.get('scale', 30.0),
             margin=0.0,  # m2 (ArcFace angular margin) 不用于 CosFace
             margin_type='cosface',
-            m3=m3_val
+            m3=m3_val,
+            label_smoothing=kwargs.get('label_smoothing', 0.0)
         )
     
     elif loss_type == 'sphereface':
@@ -818,7 +822,8 @@ def create_metric_loss(
             scale=kwargs.get('scale', 30.0),
             margin=0.0,  # m2 (ArcFace angular margin) 不用于 SphereFace
             margin_type='sphereface',
-            m1=m1_val
+            m1=m1_val,
+            label_smoothing=kwargs.get('label_smoothing', 0.0)
         )
     
     elif loss_type == 'circle':

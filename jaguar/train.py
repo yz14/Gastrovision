@@ -274,6 +274,23 @@ def main():
     if scheduler:
         print(f"调度器: {cfg.scheduler} (warmup={cfg.warmup_epochs})")
 
+    # ---- EMA decay 自动计算 ----
+    ema_decay = cfg.ema_decay
+    if cfg.ema and ema_decay >= 0.9999:
+        # 自动计算: 目标是训练结束时初始权重保留率 < 5%
+        # decay^(steps_per_epoch * epochs) < 0.05
+        # decay < 0.05^(1/(steps*epochs))
+        steps_per_epoch = len(train_loader)
+        total_steps = steps_per_epoch * cfg.epochs
+        if total_steps > 0:
+            # 使用半衰期为 total_steps/3 的 decay
+            auto_decay = 1.0 - 3.0 / total_steps
+            auto_decay = max(auto_decay, 0.99)  # 不低于 0.99
+            auto_decay = min(auto_decay, 0.9999)  # 不高于 0.9999
+            print(f"\n[AUTO] EMA decay 自动调整: {cfg.ema_decay} -> {auto_decay:.6f} "
+                  f"(steps/epoch={steps_per_epoch}, total={total_steps})")
+            ema_decay = auto_decay
+
     # ---- 训练器 ----
     trainer = ReIDTrainer(
         model=model,
@@ -286,7 +303,7 @@ def main():
         scheduler=scheduler,
         output_dir=str(output_dir),
         use_ema=cfg.ema,
-        ema_decay=cfg.ema_decay,
+        ema_decay=ema_decay,
     )
 
     # ---- 恢复训练 ----
@@ -309,11 +326,13 @@ def main():
     print("开始训练")
     print(f"{'=' * 40}\n")
 
+    save_metric = getattr(cfg, 'save_metric', 'mAP')
     trainer.fit(
         train_loader=train_loader,
         val_loader=val_loader,
         epochs=cfg.epochs,
         early_stopping=cfg.early_stopping,
+        save_metric=save_metric,
     )
 
     # ---- 推理 ----

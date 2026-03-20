@@ -97,6 +97,7 @@ class ReIDTrainer:
 
         # EMA
         self.ema = None
+        self._ema_decay = ema_decay
         if use_ema:
             self.ema = ModelEMA(model, decay=ema_decay)
             print(f"  EMA 已启用 (decay={ema_decay})")
@@ -117,6 +118,7 @@ class ReIDTrainer:
         epochs: int = 100,
         early_stopping: int = 15,
         val_label_map: dict = None,
+        save_metric: str = 'mAP',
     ):
         """
         训练主循环
@@ -127,11 +129,31 @@ class ReIDTrainer:
             epochs: 总训练轮数
             early_stopping: 早停耐心值 (0=禁用)
             val_label_map: 验证集的 label_map（用于 Re-ID 评估）
+            save_metric: 用于保存最佳模型的验证指标 ('rank1', 'mAP', 'auc')
         """
+        assert save_metric in ('rank1', 'mAP', 'auc'), \
+            f"save_metric 必须是 'rank1', 'mAP', 'auc' 之一, 收到: {save_metric}"
+        self._save_metric = save_metric
+        print(f"  最佳模型选择指标: val_{save_metric}")
+
         patience_counter = 0
         total_start = time.time()
 
         log_path = self.output_dir / 'training_log.txt'
+
+        # [DEBUG] EMA 诊断: 打印预计吸收率
+        if self.ema is not None:
+            steps_per_epoch = len(train_loader)
+            total_steps = steps_per_epoch * epochs
+            retention = self._ema_decay ** total_steps
+            print(f"  [DEBUG] EMA 诊断: decay={self._ema_decay}, "
+                  f"steps/epoch={steps_per_epoch}, total_steps={total_steps}, "
+                  f"初始权重保留率={retention:.4f} "
+                  f"(训练结束时 EMA 仅吸收 {(1-retention)*100:.1f}% 的新参数)")
+            if retention > 0.5:
+                print(f"  [WARNING] EMA 保留率 {retention:.2f} > 0.5, "
+                      f"EMA 模型将严重滞后于实际训练模型! "
+                      f"建议降低 ema_decay 到 {1 - 10/total_steps:.6f} 左右")
 
         for epoch in range(self.start_epoch, epochs):
             epoch_start = time.time()
@@ -140,6 +162,7 @@ class ReIDTrainer:
             train_metrics = self._train_epoch(train_loader, epoch, epochs)
 
             # ---- 验证 ----
+            self._current_debug_epoch = epoch
             val_metrics = self._validate(val_loader)
 
             # ---- 学习率调度 ----
@@ -178,14 +201,14 @@ class ReIDTrainer:
                 f.write(log_line + '\n')
                 f.flush()
 
-            # ---- 保存最佳模型 ----
-            metric = val_metrics['rank1']
+            # ---- 保存最佳模型 (按 save_metric 选择) ----
+            metric = val_metrics[save_metric]
             if metric > self.best_metric:
                 self.best_metric = metric
                 self.best_epoch = epoch + 1
                 patience_counter = 0
                 self._save_checkpoint(epoch, 'best_model.pth', val_metrics)
-                print(f"  ★ 新最佳! Rank-1={metric:.4f}")
+                print(f"  ★ 新最佳! {save_metric}={metric:.4f}")
             else:
                 patience_counter += 1
 
@@ -207,7 +230,7 @@ class ReIDTrainer:
 
         total_time = time.time() - total_start
         print(f"\n训练完成! 总时间: {total_time/60:.1f} 分钟")
-        print(f"最佳 Rank-1: {self.best_metric:.4f} (Epoch {self.best_epoch})")
+        print(f"最佳 {save_metric}: {self.best_metric:.4f} (Epoch {self.best_epoch})")
 
         # 保存训练历史
         with open(self.output_dir / 'train_history.json', 'w') as f:
@@ -373,6 +396,23 @@ class ReIDTrainer:
             auc = cum_pos[neg_mask].sum().item() / (n_pos * n_neg)
         else:
             auc = 0.0
+
+        # [DEBUG] Embedding 诊断 (每 10 epoch 或前 3 epoch 输出)
+        epoch_num = getattr(self, '_current_debug_epoch', 0)
+        if epoch_num < 3 or (epoch_num + 1) % 10 == 0:
+            # 相似度分布统计 (排除对角线 -inf)
+            valid_sims = sim_matrix[sim_matrix > -float('inf')]
+            if len(valid_sims) > 0:
+                # 同类/异类相似度分离度
+                pos_sims = pair_sims[pair_labels == 1]
+                neg_sims = pair_sims[pair_labels == 0]
+                pos_mean = pos_sims.mean().item() if len(pos_sims) > 0 else 0
+                neg_mean = neg_sims.mean().item() if len(neg_sims) > 0 else 0
+                gap = pos_mean - neg_mean
+                print(f"  [DEBUG] Embedding: "
+                      f"sim_all=[{valid_sims.min().item():.3f}, {valid_sims.mean().item():.3f}, {valid_sims.max().item():.3f}] "
+                      f"pos_sim={pos_mean:.3f} neg_sim={neg_mean:.3f} gap={gap:.3f} "
+                      f"emb_norm={all_embeddings.norm(dim=1).mean().item():.3f}")
 
         if self.ema is not None:
             self.ema.restore(model)

@@ -72,7 +72,7 @@ pk_k: 4                    # 每类别的实例数 (batch_size = p*k = 32)
 # 辅助损失参数同样支持 loss-type-specific 键 (如 aux_triplet_margin: 0.3)
 
 # ---- 训练 ----
-epochs: 80
+epochs: 120
 batch_size: 32
 lr: 0.0003                 # 学习率 (head + 损失头)
 backbone_lr_mult: 0.1      # backbone 学习率乘数 (backbone_lr = lr * mult)
@@ -80,7 +80,8 @@ weight_decay: 0.0001
 optimizer: "adamw"         # adam / adamw / sgd
 scheduler: "warmup_cosine" # step / cosine / plateau / warmup_cosine / none
 warmup_epochs: 5
-early_stopping: 20         # 早停 (0=禁用)
+early_stopping: 0          # 早停 (0=禁用; 小数据集配合EMA建议禁用，避免过早终止)
+save_metric: "mAP"         # 最佳模型选择指标: rank1 / mAP / auc (推荐 mAP, 与 Kaggle 分数相关性最高)
 
 # ---- 图像与增强 ----
 image_size: 384            # 输入图像尺寸 (Re-ID 通常用较大分辨率)
@@ -89,7 +90,7 @@ num_workers: 24
 
 # ---- EMA ----
 ema: true
-ema_decay: 0.9999
+ema_decay: 0.999            # EMA 衰减率 (>=0.9999 时自动计算; 小数据集推荐 0.999)
 
 # ---- 推理 ----
 use_flip_tta: true         # 推理时使用水平翻转 TTA

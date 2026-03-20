@@ -14,7 +14,7 @@ from collections import Counter
 def stratified_split(
     csv_path: str,
     val_ratio: float = 0.15,
-    min_val_per_class: int = 1,
+    min_val_per_class: int = 2,
     seed: int = 42,
     output_dir: str = None
 ) -> tuple:

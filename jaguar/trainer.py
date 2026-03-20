@@ -1,7 +1,8 @@
 """
 Jaguar Re-ID 训练器
 
-训练循环：ArcFace 分类损失 + 可选的度量学习辅助损失。
+训练循环：支持 proxy-based (ArcFace/CosFace/ProxyNCA 等) 和 pair-based (Triplet/Circle 等) 损失。
+可选辅助损失组合 (如 ArcFace + Triplet)。
 验证指标：Rank-1 准确率 + mAP（基于 embedding 余弦相似度）。
 """
 
@@ -27,42 +28,72 @@ from gastrovision.utils.metrics import AverageMeter
 from gastrovision.utils.ema import ModelEMA
 
 
+# Proxy-based 损失类型 (有可学习权重，使用 bn_feat)
+PROXY_LOSS_TYPES = {'arcface', 'cosface', 'sphereface', 'proxy_nca', 'circle_cls'}
+
+# Pair-based 损失类型 (无可学习权重，使用 raw_feat)
+PAIR_LOSS_TYPES = {'triplet', 'contrastive', 'circle', 'lifted', 'npair'}
+
+
+def is_proxy_loss(loss_type: str) -> bool:
+    """判断损失类型是否为 proxy-based (含可学习权重)"""
+    return loss_type in PROXY_LOSS_TYPES
+
+
 class ReIDTrainer:
     """
     Re-ID 训练器
 
+    支持两种损失模式:
+    - Proxy-based (ArcFace/CosFace/SphereFace/ProxyNCA/CircleLossClassLevel):
+      使用 bn_feat (BNNeck 后的特征) 计算损失，含可学习权重
+    - Pair-based (Triplet/Contrastive/Circle/Lifted/NPair):
+      使用 raw_feat (BNNeck 前的特征) 计算损失，无可学习权重
+
+    可选辅助损失 (如 ArcFace + Triplet):
+      辅助损失始终作用于 raw_feat，直接优化 embedding 的度量空间
+
     Args:
         model: ReIDModel
-        arcface_head: ArcFace 损失（含可学习权重）
-        optimizer: 优化器（需包含 model + arcface_head 的参数）
+        criterion: 主损失函数 (nn.Module)
+        loss_type: 主损失类型名称 (用于判断 proxy/pair-based)
+        optimizer: 优化器
         device: 训练设备
+        aux_criterion: 辅助损失函数 (可选)
+        aux_loss_weight: 辅助损失权重
         scheduler: 学习率调度器
         output_dir: 输出目录
         use_ema: 是否使用 EMA
         ema_decay: EMA 衰减率
-        label_smooth: 标签平滑（应用于 ArcFace 的 CE 损失）
     """
 
     def __init__(
         self,
         model: nn.Module,
-        arcface_head: nn.Module,
+        criterion: nn.Module,
+        loss_type: str,
         optimizer: Optimizer,
         device: torch.device,
+        aux_criterion: Optional[nn.Module] = None,
+        aux_loss_weight: float = 0.5,
         scheduler: Optional[_LRScheduler] = None,
         output_dir: str = './output',
         use_ema: bool = False,
         ema_decay: float = 0.9999,
-        label_smooth: float = 0.0,
     ):
         self.model = model.to(device)
-        self.arcface_head = arcface_head.to(device)
+        self.criterion = criterion.to(device)
+        self.loss_type = loss_type
+        self.is_proxy = is_proxy_loss(loss_type)
         self.optimizer = optimizer
         self.device = device
         self.scheduler = scheduler
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.label_smooth = label_smooth
+
+        # 辅助损失
+        self.aux_criterion = aux_criterion.to(device) if aux_criterion is not None else None
+        self.aux_loss_weight = aux_loss_weight
 
         # EMA
         self.ema = None
@@ -75,6 +106,9 @@ class ReIDTrainer:
         self.best_epoch = 0
         self.train_history = []
         self.start_epoch = 0
+
+        # 向后兼容: 暴露 arcface_head 属性 (只对 proxy-based 有意义)
+        self.arcface_head = self.criterion
 
     def fit(
         self,
@@ -121,15 +155,22 @@ class ReIDTrainer:
             epoch_time = time.time() - epoch_start
 
             # ---- 日志 ----
-            log_line = (
-                f"Epoch [{epoch+1}/{epochs}] "
-                f"lr={current_lr:.6f} "
-                f"train_loss={train_metrics['loss']:.4f} "
-                f"train_acc={train_metrics['acc']:.4f} "
-                f"val_rank1={val_metrics['rank1']:.4f} "
-                f"val_mAP={val_metrics['mAP']:.4f} "
-                f"time={epoch_time:.1f}s"
-            )
+            log_parts = [
+                f"Epoch [{epoch+1}/{epochs}]",
+                f"lr={current_lr:.6f}",
+                f"train_loss={train_metrics['loss']:.4f}",
+            ]
+            if train_metrics['acc'] is not None:
+                log_parts.append(f"train_acc={train_metrics['acc']:.4f}")
+            if train_metrics.get('aux_loss') is not None:
+                log_parts.append(f"aux_loss={train_metrics['aux_loss']:.4f}")
+            log_parts.extend([
+                f"val_rank1={val_metrics['rank1']:.4f}",
+                f"val_mAP={val_metrics['mAP']:.4f}",
+                f"val_coverage={val_metrics.get('valid_queries', 0)}/{val_metrics.get('total', 0)}",
+                f"time={epoch_time:.1f}s",
+            ])
+            log_line = " ".join(log_parts)
             print(log_line)
 
             with open(log_path, 'a', encoding='utf-8') as f:
@@ -158,7 +199,7 @@ class ReIDTrainer:
 
             self.train_history.append({
                 'epoch': epoch + 1,
-                **train_metrics,
+                **{k: v for k, v in train_metrics.items() if v is not None},
                 **{f'val_{k}': v for k, v in val_metrics.items()},
                 'lr': current_lr,
             })
@@ -174,29 +215,44 @@ class ReIDTrainer:
     def _train_epoch(self, loader: DataLoader, epoch: int, total_epochs: int) -> dict:
         """单个 epoch 训练"""
         self.model.train()
-        self.arcface_head.train()
+        self.criterion.train()
 
         loss_meter = AverageMeter()
         acc_meter = AverageMeter()
+        aux_loss_meter = AverageMeter() if self.aux_criterion is not None else None
 
         for batch_idx, (images, labels) in enumerate(loader):
             images = images.to(self.device)
             labels = labels.to(self.device)
 
-            # Forward: 获取 BN 后的特征用于 ArcFace
-            bn_feat = self.model(images)
+            # Forward: 始终获取 bn_feat 和 raw_feat
+            bn_feat, raw_feat = self.model(images, return_both=True)
 
-            # ArcFace loss
-            loss = self.arcface_head(bn_feat, labels)
+            # ---- 主损失 ----
+            # Proxy-based: 使用 bn_feat (BNNeck 后特征, 适合分类目标)
+            # Pair-based:  使用 raw_feat (BNNeck 前特征, 适合度量目标)
+            if self.is_proxy:
+                primary_loss = self.criterion(bn_feat, labels)
+            else:
+                primary_loss = self.criterion(raw_feat, labels)
+
+            loss = primary_loss
+
+            # ---- 辅助损失 (始终作用于 raw_feat) ----
+            aux_loss_val = None
+            if self.aux_criterion is not None:
+                aux_loss = self.aux_criterion(raw_feat, labels)
+                loss = loss + self.aux_loss_weight * aux_loss
+                aux_loss_val = aux_loss.item()
 
             # Backward
             self.optimizer.zero_grad()
             loss.backward()
             # 梯度裁剪
-            torch.nn.utils.clip_grad_norm_(
-                list(self.model.parameters()) + list(self.arcface_head.parameters()),
-                max_norm=5.0
-            )
+            all_params = list(self.model.parameters()) + list(self.criterion.parameters())
+            if self.aux_criterion is not None:
+                all_params += list(self.aux_criterion.parameters())
+            torch.nn.utils.clip_grad_norm_(all_params, max_norm=5.0)
             self.optimizer.step()
 
             # EMA 更新
@@ -207,16 +263,27 @@ class ReIDTrainer:
             batch_size = images.size(0)
             loss_meter.update(loss.item(), batch_size)
 
-            # 计算分类准确率（用 ArcFace 的 logit）
-            with torch.no_grad():
-                feat_norm = F.normalize(bn_feat, p=2, dim=1)
-                weight_norm = F.normalize(self.arcface_head.weight, p=2, dim=1)
-                cosine = torch.mm(feat_norm, weight_norm.t())
-                preds = cosine.argmax(dim=1)
-                acc = (preds == labels).float().mean().item()
-                acc_meter.update(acc, batch_size)
+            if aux_loss_meter is not None and aux_loss_val is not None:
+                aux_loss_meter.update(aux_loss_val, batch_size)
 
-        return {'loss': loss_meter.avg, 'acc': acc_meter.avg}
+            # 分类准确率 (仅 proxy-based 损失，有 .weight 属性时)
+            if self.is_proxy and hasattr(self.criterion, 'weight'):
+                with torch.no_grad():
+                    feat_norm = F.normalize(bn_feat, p=2, dim=1)
+                    weight_norm = F.normalize(self.criterion.weight, p=2, dim=1)
+                    cosine = torch.mm(feat_norm, weight_norm.t())
+                    preds = cosine.argmax(dim=1)
+                    acc = (preds == labels).float().mean().item()
+                    acc_meter.update(acc, batch_size)
+
+        result = {
+            'loss': loss_meter.avg,
+            'acc': acc_meter.avg if acc_meter.count > 0 else None,
+        }
+        if aux_loss_meter is not None:
+            result['aux_loss'] = aux_loss_meter.avg
+
+        return result
 
     @torch.no_grad()
     def _validate(self, loader: DataLoader) -> dict:
@@ -289,7 +356,7 @@ class ReIDTrainer:
         if self.ema is not None:
             self.ema.restore(model)
 
-        return {'rank1': rank1, 'mAP': mAP}
+        return {'rank1': rank1, 'mAP': mAP, 'valid_queries': valid_queries, 'total': N}
 
     def _save_checkpoint(self, epoch: int, filename: str, metrics: dict = None):
         """保存 checkpoint"""
@@ -297,11 +364,16 @@ class ReIDTrainer:
         state = {
             'epoch': epoch,
             'model_state_dict': self.model.state_dict(),
-            'arcface_state_dict': self.arcface_head.state_dict(),
+            'criterion_state_dict': self.criterion.state_dict(),
+            'loss_type': self.loss_type,
             'optimizer_state_dict': self.optimizer.state_dict(),
             'best_metric': self.best_metric,
             'best_epoch': self.best_epoch,
+            # 向后兼容
+            'arcface_state_dict': self.criterion.state_dict(),
         }
+        if self.aux_criterion is not None:
+            state['aux_criterion_state_dict'] = self.aux_criterion.state_dict()
         if self.scheduler is not None:
             state['scheduler_state_dict'] = self.scheduler.state_dict()
         if self.ema is not None:
@@ -324,8 +396,24 @@ class ReIDTrainer:
         state = torch.load(path, map_location=self.device, weights_only=False)
 
         self.model.load_state_dict(state['model_state_dict'])
-        if 'arcface_state_dict' in state:
-            self.arcface_head.load_state_dict(state['arcface_state_dict'])
+
+        # 加载主损失状态 (兼容新旧格式)
+        criterion_key = 'criterion_state_dict'
+        if criterion_key not in state:
+            criterion_key = 'arcface_state_dict'  # 向后兼容
+        if criterion_key in state:
+            try:
+                self.criterion.load_state_dict(state[criterion_key])
+            except RuntimeError as e:
+                print(f"  [警告] 主损失状态加载失败 (可能损失类型不匹配): {e}")
+
+        # 加载辅助损失状态
+        if self.aux_criterion is not None and 'aux_criterion_state_dict' in state:
+            try:
+                self.aux_criterion.load_state_dict(state['aux_criterion_state_dict'])
+            except RuntimeError as e:
+                print(f"  [警告] 辅助损失状态加载失败: {e}")
+
         if 'optimizer_state_dict' in state:
             self.optimizer.load_state_dict(state['optimizer_state_dict'])
         if self.scheduler is not None and 'scheduler_state_dict' in state:

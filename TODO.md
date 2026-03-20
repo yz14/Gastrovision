@@ -35,4 +35,4 @@
 
 # TODO   
 
-1. D:\codes\work-projects\Gastrovision_models\train_cls.py这是我训练内镜分类的代码。目前看起来都正常。我打算复用这套方案来解决https://www.kaggle.com/competitions/jaguar-re-id/overview这个kaggle比赛，我需要单独写一个数据读取和训练代码。我数据都在服务器上/data0/yzhen/data/jaguar_reid下面有csv，train和test文件夹。我把csv文件D:\codes\work-projects\Gastrovision_models\data\train.csv放到这里了，还有test.csv和提交的csv样例。请你先理解我内镜的整个代码，再理解kaggle比赛的规则和数据内容，最后再基于内镜方案给出jaguar re id的方案并进行实现。请新建一个jaguar文件夹在里面实现，如果内镜代码可以利用上的则利用，如果有更加好的方案也请加入。如果需要预处理和后处理，请单独写，并独立实施。如果需要数据划分，请注意只需要训练集和验证集即可，因为测试集已经有了，而且验证集里面每个类别至少保证有一个样例。  
+1. D:\codes\work-projects\Gastrovision_models\train_cls.py这是我训练内镜分类的代码。目前看起来都正常。我复用这套方案来解决https://www.kaggle.com/competitions/jaguar-re-id/overview这个kaggle比赛。我数据都在服务器上/data0/yzhen/data/jaguar_reid下面有csv，train和test文件夹。我把csv文件D:\codes\work-projects\Gastrovision_models\data\train.csv放到这里了，还有test.csv和提交的csv样例。我写好的方案在D:\codes\work-projects\Gastrovision_models\jaguar这里。请先进行一次彻底的，细致的代码审查。我在服务器上进行了训练，训练集损失一直下降，但是验证集指标一直不变，我感觉有问题。其次，度量学习损失需要支持切换，我要全面的对比D:\codes\work-projects\Gastrovision_models\gastrovision\losses\metric_learning.py这里的损失的效果，不同的损失中需要额外参数的请提前给定合理的默认参数。

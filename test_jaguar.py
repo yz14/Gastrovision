@@ -286,8 +286,8 @@ def test_trainer_one_step():
 
     with tempfile.TemporaryDirectory() as tmp:
         trainer = ReIDTrainer(
-            model=model, arcface_head=arcface, optimizer=optimizer,
-            device=device, output_dir=tmp
+            model=model, criterion=arcface, loss_type='arcface',
+            optimizer=optimizer, device=device, output_dir=tmp
         )
 
         # 模拟一个 batch
@@ -336,8 +336,8 @@ def test_validation():
         optimizer = torch.optim.Adam(all_params, lr=0.001)
 
         trainer = ReIDTrainer(
-            model=model, arcface_head=arcface, optimizer=optimizer,
-            device=device, output_dir=tmp
+            model=model, criterion=arcface, loss_type='arcface',
+            optimizer=optimizer, device=device, output_dir=tmp
         )
 
         metrics = trainer._validate(loader)
@@ -414,8 +414,8 @@ def test_checkpoint_save_load():
         optimizer = torch.optim.Adam(all_params, lr=0.001)
 
         trainer = ReIDTrainer(
-            model=model, arcface_head=arcface, optimizer=optimizer,
-            device=device, output_dir=tmp
+            model=model, criterion=arcface, loss_type='arcface',
+            optimizer=optimizer, device=device, output_dir=tmp
         )
 
         # 保存
@@ -433,8 +433,8 @@ def test_checkpoint_save_load():
         optimizer2 = torch.optim.Adam(all_params2, lr=0.001)
 
         trainer2 = ReIDTrainer(
-            model=model2, arcface_head=arcface2, optimizer=optimizer2,
-            device=device, output_dir=tmp
+            model=model2, criterion=arcface2, loss_type='arcface',
+            optimizer=optimizer2, device=device, output_dir=tmp
         )
         trainer2.load_checkpoint('test_ckpt.pth')
 
@@ -463,8 +463,9 @@ def test_ema():
         optimizer = torch.optim.Adam(all_params, lr=0.001)
 
         trainer = ReIDTrainer(
-            model=model, arcface_head=arcface, optimizer=optimizer,
-            device=device, output_dir=tmp, use_ema=True, ema_decay=0.999
+            model=model, criterion=arcface, loss_type='arcface',
+            optimizer=optimizer, device=device, output_dir=tmp,
+            use_ema=True, ema_decay=0.999
         )
 
         assert trainer.ema is not None
@@ -510,6 +511,184 @@ def test_build_model():
     print("✓ test_build_model PASSED")
 
 
+def test_pretrained_local_path():
+    """测试从本地路径加载预训练权重"""
+    from jaguar.model import ReIDModel
+    import torchvision.models as models
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # 保存一个 backbone 的 state_dict
+        backbone = models.resnet18(weights=None)
+        weight_path = str(Path(tmp) / 'resnet18_test.pth')
+        torch.save(backbone.state_dict(), weight_path)
+
+        # 用 pretrained_path 加载
+        model = ReIDModel(
+            backbone_name='resnet18',
+            embedding_dim=128,
+            pretrained=False,
+            pretrained_path=weight_path,
+            use_gem=False,
+        )
+
+        # 验证 backbone 权重与保存的一致
+        saved_state = torch.load(weight_path, map_location='cpu', weights_only=False)
+        for name, param in model.backbone.named_parameters():
+            if name in saved_state:
+                assert torch.equal(param.data, saved_state[name]), \
+                    f"权重不一致: {name}"
+
+        # 验证 Trainer checkpoint 格式也能加载
+        ckpt_path = str(Path(tmp) / 'ckpt_format.pth')
+        torch.save({'model_state_dict': backbone.state_dict()}, ckpt_path)
+
+        model2 = ReIDModel(
+            backbone_name='resnet18',
+            embedding_dim=128,
+            pretrained=False,
+            pretrained_path=ckpt_path,
+            use_gem=False,
+        )
+
+        x = torch.randn(2, 3, 224, 224)
+        emb = model2.extract_embedding(x)
+        assert emb.shape == (2, 128)
+
+    print("✓ test_pretrained_local_path PASSED")
+
+
+def test_efficientnet_no_double_dropout():
+    """测试 EfficientNet 内置 Dropout 已被移除"""
+    from jaguar.model import ReIDModel
+
+    model = ReIDModel(
+        backbone_name='efficientnet_v2_s',
+        embedding_dim=512,
+        pretrained=False,
+        use_gem=False,
+        dropout=0.1,  # ReIDModel 自己的 dropout
+    )
+
+    # 检查 backbone.classifier 中不再有 nn.Dropout
+    if hasattr(model.backbone.classifier, '__getitem__'):
+        for layer in model.backbone.classifier:
+            assert not isinstance(layer, nn.Dropout), \
+                "EfficientNet 内置 Dropout 应已被移除"
+
+    # 功能验证
+    x = torch.randn(2, 3, 224, 224)
+    emb = model.extract_embedding(x)
+    assert emb.shape == (2, 512)
+
+    print("✓ test_efficientnet_no_double_dropout PASSED")
+
+
+def test_loss_types():
+    """测试所有损失类型的创建和单步训练"""
+    from jaguar.model import ReIDModel
+    from jaguar.trainer import ReIDTrainer
+    from gastrovision.losses.metric_learning import create_metric_loss
+
+    device = torch.device('cpu')
+    num_classes = 5
+    embedding_dim = 128
+
+    # 所有支持的损失类型
+    proxy_losses = ['arcface', 'cosface', 'sphereface', 'proxy_nca', 'circle_cls']
+    pair_losses = ['triplet', 'contrastive', 'circle', 'lifted', 'npair']
+
+    images = torch.randn(8, 3, 224, 224)
+    # 确保每个标签至少出现 2 次 (triplet/contrastive 等需要正样本对)
+    labels = torch.tensor([0, 0, 1, 1, 2, 2, 3, 3])
+
+    for loss_type in proxy_losses + pair_losses:
+        model = ReIDModel('resnet18', embedding_dim=embedding_dim,
+                          pretrained=False, use_gem=False)
+        criterion = create_metric_loss(
+            loss_type=loss_type,
+            num_classes=num_classes,
+            embedding_dim=embedding_dim,
+        )
+
+        all_params = list(model.parameters()) + list(criterion.parameters())
+        optimizer = torch.optim.Adam(all_params, lr=0.001)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            trainer = ReIDTrainer(
+                model=model, criterion=criterion, loss_type=loss_type,
+                optimizer=optimizer, device=device, output_dir=tmp
+            )
+
+            # 单步训练
+            train_metrics = trainer._train_epoch(
+                torch.utils.data.DataLoader(
+                    torch.utils.data.TensorDataset(images, labels),
+                    batch_size=8
+                ),
+                epoch=0, total_epochs=1
+            )
+
+            assert train_metrics['loss'] > 0, \
+                f"{loss_type}: loss 应 > 0, 实际 {train_metrics['loss']}"
+
+            # proxy-based 应有 acc, pair-based 无 acc
+            if loss_type in proxy_losses:
+                assert train_metrics['acc'] is not None or loss_type == 'proxy_nca', \
+                    f"{loss_type}: proxy-based 应有 acc"
+            else:
+                assert train_metrics['acc'] is None, \
+                    f"{loss_type}: pair-based 不应有 acc"
+
+        print(f"  ✓ {loss_type} OK")
+
+    print("✓ test_loss_types PASSED")
+
+
+def test_auxiliary_loss():
+    """测试辅助损失 (ArcFace + Triplet)"""
+    from jaguar.model import ReIDModel
+    from jaguar.trainer import ReIDTrainer
+    from gastrovision.losses.metric_learning import create_metric_loss
+
+    device = torch.device('cpu')
+    num_classes = 5
+    embedding_dim = 128
+
+    model = ReIDModel('resnet18', embedding_dim=embedding_dim,
+                      pretrained=False, use_gem=False)
+    criterion = create_metric_loss('arcface', num_classes=num_classes,
+                                   embedding_dim=embedding_dim)
+    aux_criterion = create_metric_loss('triplet')
+
+    all_params = list(model.parameters()) + list(criterion.parameters())
+    optimizer = torch.optim.Adam(all_params, lr=0.001)
+
+    images = torch.randn(8, 3, 224, 224)
+    labels = torch.tensor([0, 0, 1, 1, 2, 2, 3, 3])
+
+    with tempfile.TemporaryDirectory() as tmp:
+        trainer = ReIDTrainer(
+            model=model, criterion=criterion, loss_type='arcface',
+            optimizer=optimizer, device=device, output_dir=tmp,
+            aux_criterion=aux_criterion, aux_loss_weight=0.5
+        )
+
+        train_metrics = trainer._train_epoch(
+            torch.utils.data.DataLoader(
+                torch.utils.data.TensorDataset(images, labels),
+                batch_size=8
+            ),
+            epoch=0, total_epochs=1
+        )
+
+        assert train_metrics['loss'] > 0
+        assert train_metrics['acc'] is not None
+        assert 'aux_loss' in train_metrics
+        assert train_metrics['aux_loss'] > 0
+
+    print("✓ test_auxiliary_loss PASSED")
+
+
 # ================================================================
 # 运行所有测试
 # ================================================================
@@ -531,6 +710,10 @@ if __name__ == '__main__':
         test_inference,
         test_checkpoint_save_load,
         test_ema,
+        test_pretrained_local_path,
+        test_efficientnet_no_double_dropout,
+        test_loss_types,
+        test_auxiliary_loss,
     ]
 
     passed = 0

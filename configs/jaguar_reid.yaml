@@ -17,7 +17,7 @@ train_csv: "/data0/yzhen/data/jaguar_reid/train.csv"
 train_image_dir: "/data0/yzhen/data/jaguar_reid/train"
 test_csv: "/data0/yzhen/data/jaguar_reid/test.csv"
 test_image_dir: "/data0/yzhen/data/jaguar_reid/test"
-output_dir: "/data0/yzhen/data/jaguar_reid/output/exp01"
+output_dir: "/data0/yzhen/projects/gastrovision_v3/output/jaguar_arcface"
 
 # ---- 数据划分 ----
 val_ratio: 0.15            # 验证集比例
@@ -25,21 +25,49 @@ seed: 42
 
 # ---- 模型 ----
 # 可选: resnet50, resnet101, convnext_tiny/small/base, efficientnet_v2_s/m/l, swin_t/s/b
-backbone: "convnext_base"
+backbone: "resnet50"
 embedding_dim: 512         # 嵌入维度
 pretrained: true           # ImageNet 预训练
+pretrained_path: "/data0/data/resnet50.pth"        # 本地预训练权重路径 (为空则使用 torchvision 默认下载)
+                           # 示例: "/data0/yzhen/pretrained/convnext_base_1k_224_ema.pth"
 use_gem: true              # GeM Pooling (优于 AvgPool)
 gem_p: 3.0                 # GeM 初始 p 值
 dropout: 0.0               # embedding FC 前的 dropout
 
-# ---- ArcFace ----
-arcface_scale: 30.0        # ArcFace 缩放因子 s
-arcface_margin: 0.5        # ArcFace 角度间隔 m (弧度)
+# ---- 损失函数 ----
+# 主损失类型:
+#   Proxy-based (含可学习权重, 用 BNNeck 后特征):
+#     arcface    — ArcFace (CVPR 2019, 推荐默认)
+#     cosface    — CosFace (CVPR 2018)
+#     sphereface — SphereFace (CVPR 2017)
+#     proxy_nca  — Proxy NCA (NeurIPS 2017)
+#     circle_cls — Circle Loss 分类版 (CVPR 2020)
+#
+#   Pair-based (无可学习权重, 用 BNNeck 前特征):
+#     triplet     — Triplet Loss + Batch Hard Mining (CVPR 2015)
+#     contrastive — Contrastive Loss (CVPR 2006)
+#     circle      — Circle Loss pair 版 (CVPR 2020)
+#     lifted      — Lifted Structure Loss (CVPR 2016)
+#     npair       — N-pair Loss (NeurIPS 2016)
+loss_type: "arcface"
+# 每种损失有合理默认参数 (见 train.py LOSS_DEFAULTS)，切换 loss_type 无需改动参数。
+# 如需覆盖，使用 loss-type-specific 键 (如 arcface_scale, triplet_margin):
+# arcface_scale: 30.0      # ArcFace 缩放因子 s (默认 30.0)
+# arcface_margin: 0.5      # ArcFace 角度间隔 m2 (默认 0.5 rad ≈ 28.6°)
+# triplet_margin: 0.3      # Triplet 距离间隔 (默认 0.3)
+# circle_scale: 256.0      # CircleLoss 缩放因子 γ (默认 256.0)
+# circle_margin: 0.25      # CircleLoss 间隔 m (默认 0.25)
+
+# 辅助损失 (可选, 与主损失组合, 始终作用于 BNNeck 前特征)
+# 推荐: arcface + triplet 是经典 Re-ID 组合
+aux_loss_type: "none"      # triplet / contrastive / circle / lifted / npair / none
+aux_loss_weight: 0.5       # 辅助损失权重 (total_loss = primary + weight * aux)
+# 辅助损失参数同样支持 loss-type-specific 键 (如 aux_triplet_margin: 0.3)
 
 # ---- 训练 ----
 epochs: 80
 batch_size: 32
-lr: 0.0003                 # 学习率 (head + arcface)
+lr: 0.0003                 # 学习率 (head + 损失头)
 backbone_lr_mult: 0.1      # backbone 学习率乘数 (backbone_lr = lr * mult)
 weight_decay: 0.0001
 optimizer: "adamw"         # adam / adamw / sgd
@@ -50,7 +78,7 @@ early_stopping: 20         # 早停 (0=禁用)
 # ---- 图像与增强 ----
 image_size: 384            # 输入图像尺寸 (Re-ID 通常用较大分辨率)
 augment_level: "heavy"     # light / medium / heavy (Re-ID 推荐 heavy)
-num_workers: 4
+num_workers: 24
 
 # ---- EMA ----
 ema: true

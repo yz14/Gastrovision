@@ -13,6 +13,7 @@ Jaguar Re-ID 模型模块
 - BNNeck: 在 embedding 和分类头之间加 BatchNorm，分离度量学习和分类目标
 """
 
+import os
 import math
 import torch
 import torch.nn as nn
@@ -69,6 +70,7 @@ class ReIDModel(nn.Module):
         backbone_name: str = 'convnext_base',
         embedding_dim: int = 512,
         pretrained: bool = True,
+        pretrained_path: str = '',
         use_gem: bool = True,
         gem_p: float = 3.0,
         dropout: float = 0.0,
@@ -81,8 +83,32 @@ class ReIDModel(nn.Module):
             raise ValueError(f"不支持的 backbone: {backbone_name}. 可选: {list(MODEL_CONFIGS.keys())}")
 
         model_fn, weights_enum, head_type = MODEL_CONFIGS[backbone_name]
-        weights = weights_enum if pretrained else None
-        backbone = model_fn(weights=weights)
+
+        # 加载预训练权重
+        # 优先级: pretrained_path(本地文件) > torchvision 默认(网络/缓存) > 随机初始化
+        if pretrained_path and os.path.isfile(pretrained_path):
+            backbone = model_fn(weights=None)
+            raw = torch.load(pretrained_path, map_location='cpu', weights_only=False)
+            # 兼容 Trainer checkpoint 格式 (含 model_state_dict 键)
+            if isinstance(raw, dict) and 'model_state_dict' in raw:
+                state_dict = raw['model_state_dict']
+            elif isinstance(raw, dict) and 'state_dict' in raw:
+                state_dict = raw['state_dict']
+            else:
+                state_dict = raw
+            missing, unexpected = backbone.load_state_dict(state_dict, strict=False)
+            print(f"  加载本地预训练权重: {pretrained_path}")
+            if missing:
+                print(f"  [提示] 缺失的键: {missing[:5]}{'...' if len(missing) > 5 else ''}")
+            if unexpected:
+                print(f"  [提示] 多余的键: {unexpected[:5]}{'...' if len(unexpected) > 5 else ''}")
+        elif pretrained:
+            weights = weights_enum
+            backbone = model_fn(weights=weights)
+            print(f"  加载 ImageNet 预训练权重: {weights}")
+        else:
+            backbone = model_fn(weights=None)
+            print(f"  使用随机初始化权重")
 
         # 获取 backbone 输出维度并移除分类头
         self.backbone_dim = self._remove_head(backbone, head_type)
@@ -96,10 +122,11 @@ class ReIDModel(nn.Module):
                 nn.AdaptiveAvgPool2d(1),
                 nn.Flatten(1)
             )
-        # 对于某些 backbone（ConvNeXt, EfficientNet, Swin）已经内置了 pooling，
-        # 需要在 forward 中判断是否需要额外 pool
+        # 仅 ResNet 系列需要手动 pool（输出 4D 特征图）；
+        # ConvNeXt/EfficientNet/Swin 自带 avgpool 层，输出已是 2D (B, C)，
+        # 因此即使 use_gem=True，GeM pooling 也仅对 ResNet 系列生效。
         self._head_type = head_type
-        self._needs_pool = head_type == 'fc'  # ResNet 系列需要手动 pool
+        self._needs_pool = head_type == 'fc'
 
         # ---- Embedding Head ----
         self.dropout = nn.Dropout(p=dropout) if dropout > 0 else nn.Identity()
@@ -122,6 +149,10 @@ class ReIDModel(nn.Module):
             if hasattr(backbone.classifier, '__getitem__'):
                 dim = backbone.classifier[-1].in_features
                 backbone.classifier[-1] = nn.Identity()
+                # 移除 EfficientNet 内置的 Dropout，避免与 ReIDModel.dropout 重复
+                for i, layer in enumerate(backbone.classifier):
+                    if isinstance(layer, nn.Dropout):
+                        backbone.classifier[i] = nn.Identity()
             else:
                 dim = backbone.classifier.in_features
                 backbone.classifier = nn.Identity()
@@ -189,6 +220,7 @@ def build_model(cfg) -> ReIDModel:
         backbone_name=cfg.backbone,
         embedding_dim=cfg.embedding_dim,
         pretrained=cfg.pretrained,
+        pretrained_path=getattr(cfg, 'pretrained_path', ''),
         use_gem=cfg.use_gem,
         gem_p=cfg.gem_p,
         dropout=cfg.dropout,

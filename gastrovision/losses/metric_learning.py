@@ -811,7 +811,7 @@ def create_metric_loss(
         assert num_classes > 0 and embedding_dim > 0, \
             "SphereFaceLoss 需要 num_classes 和 embedding_dim"
         # SphereFace 仅使用 m1 (角度乘数)，用户的 --metric_loss_margin 应映射到 m1
-        m1_val = kwargs.get('margin', 4.0)
+        m1_val = kwargs.get('margin', 1.5)
         return ArcFaceLoss(
             num_classes=num_classes,
             embedding_dim=embedding_dim,

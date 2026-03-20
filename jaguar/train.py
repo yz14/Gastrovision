@@ -24,14 +24,74 @@ sys.path.insert(0, str(ROOT))
 
 from gastrovision.utils.config import load_config, save_config
 from gastrovision.utils.scheduler import get_scheduler
-from gastrovision.losses.metric_learning import ArcFaceLoss
+from gastrovision.losses.metric_learning import create_metric_loss
 
 from jaguar.split import stratified_split, build_label_map
 from jaguar.dataset import JaguarTrainDataset
 from jaguar.transforms import get_train_transforms, get_val_transforms
 from jaguar.model import build_model
-from jaguar.trainer import ReIDTrainer
+from jaguar.trainer import ReIDTrainer, is_proxy_loss
+from jaguar.sampler import PKSampler
 from jaguar.inference import extract_embeddings, predict_similarity_fast
+
+
+# 每种损失函数的合理默认参数
+# 用户如果在 YAML 中显式设置了 loss_scale/loss_margin，则覆盖这些默认值
+LOSS_DEFAULTS = {
+    'arcface':     {'scale': 30.0,  'margin': 0.5},
+    'cosface':     {'scale': 30.0,  'margin': 0.35},
+    'sphereface':  {'scale': 30.0,  'margin': 1.5},
+    'proxy_nca':   {'scale': 8.0,   'margin': 0.0},
+    'circle_cls':  {'scale': 256.0, 'margin': 0.25},
+    'triplet':     {'scale': 1.0,   'margin': 0.3},
+    'contrastive': {'scale': 1.0,   'margin': 1.0},
+    'circle':      {'scale': 256.0, 'margin': 0.25},
+    'lifted':      {'scale': 1.0,   'margin': 1.0},
+    'npair':       {'scale': 1.0,   'margin': 0.0},
+}
+
+
+def _create_loss(cfg, loss_type: str, num_classes: int, embedding_dim: int, prefix: str = ''):
+    """
+    根据配置创建损失函数
+
+    优先级：
+      1. 用户在 YAML 中的 loss-type-specific 配置 (如 arcface_scale)
+      2. LOSS_DEFAULTS 中该损失的合理默认值
+      3. create_metric_loss 工厂函数的内置默认值
+
+    不再使用全局 loss_scale / loss_margin，因为不同损失的参数含义和范围不同。
+
+    Args:
+        cfg: 配置对象
+        loss_type: 损失类型名称
+        num_classes: 类别数
+        embedding_dim: embedding 维度
+        prefix: 配置参数前缀 (用于辅助损失: 'aux_')
+
+    Returns:
+        nn.Module 损失函数
+    """
+    lt = loss_type.lower()
+    defaults = LOSS_DEFAULTS.get(lt, {'scale': 30.0, 'margin': 0.5})
+
+    # 优先读取 loss-type-specific 配置 (如 arcface_scale, triplet_margin)
+    # 回退到 LOSS_DEFAULTS 中的合理默认值
+    scale = getattr(cfg, f'{prefix}{lt}_scale', defaults['scale'])
+    margin = getattr(cfg, f'{prefix}{lt}_margin', defaults['margin'])
+
+    print(f"  [{prefix or 'primary'}] {loss_type}: scale={scale}, margin={margin}")
+
+    # 创建损失
+    loss = create_metric_loss(
+        loss_type=loss_type,
+        num_classes=num_classes,
+        embedding_dim=embedding_dim,
+        scale=scale,
+        margin=margin,
+    )
+
+    return loss
 
 
 def main():
@@ -107,14 +167,39 @@ def main():
     print(f"验证集: {len(val_dataset)} 样本")
 
     # ---- DataLoader ----
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=cfg.batch_size,
-        shuffle=True,
-        num_workers=cfg.num_workers,
-        pin_memory=True,
-        drop_last=True,
-    )
+    # Pair-based 损失需要 PK sampler 确保每个 batch 有足够正样本对
+    # Proxy-based 损失使用普通 shuffle 即可
+    loss_type = getattr(cfg, 'loss_type', 'arcface')
+    use_pk_sampler = not is_proxy_loss(loss_type)
+
+    if use_pk_sampler:
+        pk_p = getattr(cfg, 'pk_p', 8)   # 每 batch 的类别数
+        pk_k = getattr(cfg, 'pk_k', 4)   # 每类别的实例数
+        train_sampler = PKSampler(
+            labels=train_dataset.get_labels(),
+            p=pk_p,
+            k=pk_k,
+            seed=cfg.seed,
+        )
+        effective_batch_size = pk_p * pk_k
+        print(f"  PK Sampler: P={pk_p}, K={pk_k} (batch_size={effective_batch_size})")
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=effective_batch_size,
+            sampler=train_sampler,
+            num_workers=cfg.num_workers,
+            pin_memory=True,
+            drop_last=False,
+        )
+    else:
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=cfg.batch_size,
+            shuffle=True,
+            num_workers=cfg.num_workers,
+            pin_memory=True,
+            drop_last=True,
+        )
     val_loader = DataLoader(
         val_dataset,
         batch_size=cfg.batch_size * 2,
@@ -128,25 +213,35 @@ def main():
     model = build_model(cfg)
     model = model.to(device)
 
-    # ---- ArcFace Head ----
-    arcface_head = ArcFaceLoss(
-        num_classes=num_classes,
-        embedding_dim=cfg.embedding_dim,
-        scale=cfg.arcface_scale,
-        margin=cfg.arcface_margin,
-    )
-    arcface_head = arcface_head.to(device)
-    print(f"ArcFace: scale={cfg.arcface_scale}, margin={cfg.arcface_margin}")
+    # ---- 损失函数 ----
+    print(f"\n主损失: {loss_type}")
+
+    criterion = _create_loss(cfg, loss_type, num_classes, cfg.embedding_dim)
+    criterion = criterion.to(device)
+
+    # 辅助损失 (可选)
+    aux_loss_type = getattr(cfg, 'aux_loss_type', 'none')
+    aux_criterion = None
+    aux_loss_weight = getattr(cfg, 'aux_loss_weight', 0.5)
+
+    if aux_loss_type and aux_loss_type != 'none':
+        print(f"辅助损失: {aux_loss_type} (weight={aux_loss_weight})")
+        aux_criterion = _create_loss(
+            cfg, aux_loss_type, num_classes, cfg.embedding_dim, prefix='aux_'
+        )
+        aux_criterion = aux_criterion.to(device)
 
     # ---- 优化器 ----
-    # 分组学习率：backbone 较低, embedding + arcface 较高
+    # 分组学习率：backbone 较低, embedding + 损失头 较高
     backbone_params = list(model.backbone.parameters())
     head_params = (
         list(model.embedding.parameters()) +
         list(model.bn_neck.parameters()) +
-        list(arcface_head.parameters())
+        list(criterion.parameters())  # proxy-based 损失的可学习权重
     )
-    if hasattr(model, 'pool') and hasattr(model.pool, 'parameters'):
+    if aux_criterion is not None:
+        head_params += list(aux_criterion.parameters())
+    if model._needs_pool and hasattr(model, 'pool') and hasattr(model.pool, 'parameters'):
         head_params += list(model.pool.parameters())
 
     param_groups = [
@@ -175,9 +270,12 @@ def main():
     # ---- 训练器 ----
     trainer = ReIDTrainer(
         model=model,
-        arcface_head=arcface_head,
+        criterion=criterion,
+        loss_type=loss_type,
         optimizer=optimizer,
         device=device,
+        aux_criterion=aux_criterion,
+        aux_loss_weight=aux_loss_weight,
         scheduler=scheduler,
         output_dir=str(output_dir),
         use_ema=cfg.ema,
@@ -193,6 +291,9 @@ def main():
         if not cfg.resume:
             # 尝试加载 best_model.pth
             trainer.load_checkpoint('best_model.pth')
+        if trainer.ema is not None:
+            trainer.ema.apply_shadow(model)
+            print("  已应用 EMA 权重")
         _run_inference(cfg, model, device, output_dir)
         return
 
@@ -214,6 +315,10 @@ def main():
     print(f"{'=' * 40}")
 
     trainer.load_checkpoint('best_model.pth')
+    # 推理时应用 EMA 权重 (验证选择最佳模型时使用的就是 EMA 权重)
+    if trainer.ema is not None:
+        trainer.ema.apply_shadow(model)
+        print("  已应用 EMA 权重")
     _run_inference(cfg, model, device, output_dir)
 
     print("\n完成!")

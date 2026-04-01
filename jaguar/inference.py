@@ -19,6 +19,27 @@ from .dataset import JaguarTestDataset
 from .transforms import get_val_transforms
 
 
+def _sigmoid_calibrate(sims: np.ndarray) -> np.ndarray:
+    """
+    基于 IQR 的 Robust Z-score + Sigmoid 校准
+
+    将余弦相似度（通常压缩在窄小区间）映射到 [0, 1]，
+    比线性 (sim+1)/2 有更好的区分度。
+
+    Args:
+        sims: 相似度数组
+
+    Returns:
+        校准后的相似度数组，元素在 [0, 1]
+    """
+    median = np.median(sims)
+    q75, q25 = np.percentile(sims, [75, 25])
+    iqr = max(q75 - q25, 1e-6)
+    z = (sims - median) / (iqr * 0.7413)  # IQR-based robust z-score
+    print(f"校准参数: median={median:.4f}, IQR={iqr:.4f}")
+    return 1.0 / (1.0 + np.exp(-z))  # sigmoid → [0, 1]
+
+
 @torch.no_grad()
 def extract_embeddings(
     model,
@@ -123,14 +144,8 @@ def predict_similarity(
     if missing:
         print(f"[警告] {len(missing)} 张图片缺少 embedding")
 
-    # 自适应 sigmoid 校准
     sims_arr = np.array(similarities)
-    median = np.median(sims_arr)
-    q75, q25 = np.percentile(sims_arr, [75, 25])
-    iqr = max(q75 - q25, 1e-6)
-    z = (sims_arr - median) / (iqr * 0.7413)
-    calibrated = 1.0 / (1.0 + np.exp(-z))
-    print(f"校准参数: median={median:.4f}, IQR={iqr:.4f}")
+    calibrated = _sigmoid_calibrate(sims_arr)
 
     submission = pd.DataFrame({
         'row_id': test_df['row_id'],
@@ -140,9 +155,9 @@ def predict_similarity(
     if output_path:
         submission.to_csv(output_path, index=False)
         print(f"提交文件已保存: {output_path}")
-        print(f"相似度统计: mean={np.mean(similarities):.4f}, "
-              f"std={np.std(similarities):.4f}, "
-              f"min={np.min(similarities):.4f}, max={np.max(similarities):.4f}")
+        print(f"相似度统计: mean={sims_arr.mean():.4f}, "
+              f"std={sims_arr.std():.4f}, "
+              f"min={sims_arr.min():.4f}, max={sims_arr.max():.4f}")
 
     return submission
 
@@ -192,17 +207,8 @@ def predict_similarity_fast(
     g_embs = emb_matrix[gallery_indices]  # (N_pairs, D)
     sims = (q_embs * g_embs).sum(dim=1)  # (N_pairs,)
 
-    # 自适应 sigmoid 校准: 将余弦相似度映射到 [0, 1]
-    # 基于分布统计（中位数 + IQR）进行归一化后过 sigmoid
-    # 比 (sim+1)/2 的线性映射区分度更好
     sims_np = sims.numpy()
-    median = np.median(sims_np)
-    q75, q25 = np.percentile(sims_np, [75, 25])
-    iqr = max(q75 - q25, 1e-6)
-    # 标准化到 ~N(0,1) 然后 sigmoid
-    z = (sims_np - median) / (iqr * 0.7413)  # IQR-based robust z-score
-    sims = 1.0 / (1.0 + np.exp(-z))  # sigmoid → [0, 1]
-    print(f"校准参数: median={median:.4f}, IQR={iqr:.4f}")
+    sims = _sigmoid_calibrate(sims_np)
 
     submission = pd.DataFrame({
         'row_id': test_df['row_id'],

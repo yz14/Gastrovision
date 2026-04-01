@@ -220,6 +220,16 @@ def main():
     model = build_model(cfg)
     model = model.to(device)
 
+    # ---- 冻结 Backbone（可选）----
+    freeze_backbone = getattr(cfg, 'freeze_backbone', False)
+    if freeze_backbone:
+        for param in model.backbone.parameters():
+            param.requires_grad_(False)
+        frozen_params = sum(p.numel() for p in model.backbone.parameters()) / 1e6
+        print(f"  [冻结] Backbone 已冻结 ({frozen_params:.2f}M 参数, requires_grad=False)")
+    else:
+        print(f"  [解冻] Backbone 与 Head 一起训练")
+
     # ---- 损失函数 ----
     print(f"\n主损失: {loss_type}")
 
@@ -239,8 +249,7 @@ def main():
         aux_criterion = aux_criterion.to(device)
 
     # ---- 优化器 ----
-    # 分组学习率：backbone 较低, embedding + 损失头 较高
-    backbone_params = list(model.backbone.parameters())
+    # 分组学习率：backbone 较低（或冻结跳过）, embedding + 损失头 较高
     head_params = (
         list(model.embedding.parameters()) +
         list(model.bn_neck.parameters()) +
@@ -248,13 +257,21 @@ def main():
     )
     if aux_criterion is not None:
         head_params += list(aux_criterion.parameters())
-    if model._needs_pool and hasattr(model, 'pool') and hasattr(model.pool, 'parameters'):
+    if model._use_gem and hasattr(model, 'pool') and isinstance(model.pool, torch.nn.Module):
         head_params += list(model.pool.parameters())
 
-    param_groups = [
-        {'params': backbone_params, 'lr': cfg.lr * cfg.backbone_lr_mult},
-        {'params': head_params, 'lr': cfg.lr},
-    ]
+    if freeze_backbone:
+        # Backbone 已冻结，只优化 head
+        param_groups = [
+            {'params': head_params, 'lr': cfg.lr},
+        ]
+        print(f"  优化器仅包含 Head 参数 (backbone 冻结)")
+    else:
+        backbone_params = list(model.backbone.parameters())
+        param_groups = [
+            {'params': backbone_params, 'lr': cfg.lr * cfg.backbone_lr_mult},
+            {'params': head_params, 'lr': cfg.lr},
+        ]
 
     if cfg.optimizer == 'adamw':
         optimizer = torch.optim.AdamW(param_groups, weight_decay=cfg.weight_decay)
@@ -263,7 +280,10 @@ def main():
     else:
         optimizer = torch.optim.Adam(param_groups, weight_decay=cfg.weight_decay)
 
-    print(f"优化器: {cfg.optimizer} (backbone_lr={cfg.lr * cfg.backbone_lr_mult:.6f}, head_lr={cfg.lr:.6f})")
+    if freeze_backbone:
+        print(f"优化器: {cfg.optimizer} (head_lr={cfg.lr:.6f}, backbone=冻结)")
+    else:
+        print(f"优化器: {cfg.optimizer} (backbone_lr={cfg.lr * cfg.backbone_lr_mult:.6f}, head_lr={cfg.lr:.6f})")
 
     # ---- 调度器 ----
     scheduler = get_scheduler(
@@ -308,13 +328,33 @@ def main():
 
     # ---- 恢复训练 ----
     if cfg.resume:
-        trainer.load_checkpoint(cfg.resume)
+        # reset_best_metric: 两阶段训练时需要设 True
+        # Phase1 (freeze_backbone=True) 训完后 best_metric 较高。
+        # Phase2 (freeze_backbone=False) 如果继承该值，会导致 Phase2 无法保存最佳模型。
+        # reset_scheduler: Phase1 scheduler 已抟冠到极低 LR。
+        # Phase2 应为全新周期，需要重建 scheduler。
+        reset_best_metric = getattr(cfg, 'reset_best_metric', False)
+        reset_scheduler_on_resume = getattr(cfg, 'reset_scheduler', False)
+
+        trainer.load_checkpoint(cfg.resume, reset_best_metric=reset_best_metric)
+
+        # Phase2 重建 scheduler （避免从 Phase1 的极低 LR 开始）
+        if reset_scheduler_on_resume and scheduler is not None:
+            new_scheduler = get_scheduler(
+                optimizer, cfg.scheduler, cfg.epochs,
+                steps_per_epoch=len(train_loader),
+                warmup_epochs=cfg.warmup_epochs
+            )
+            trainer.scheduler = new_scheduler
+            print(f"  [两阶段训练] Scheduler 已重建，Phase2 将从新的 LR 周期开始")
+            print(f"  [两阶段训练] 当前 LR = {optimizer.param_groups[0]['lr']:.6f}")
 
     # ---- 测试模式 ----
     if cfg.test_only:
         if not cfg.resume:
-            # 尝试加载 best_model.pth
             trainer.load_checkpoint('best_model.pth')
+        # 保留 apply_shadow 兼容旧 checkpoint（旧版存训练权重）。
+        # 新 checkpoint 已内置 EMA 权重，此处为幂等操作。
         if trainer.ema is not None:
             trainer.ema.apply_shadow(model)
             print("  已应用 EMA 权重")
@@ -341,7 +381,9 @@ def main():
     print(f"{'=' * 40}")
 
     trainer.load_checkpoint('best_model.pth')
-    # 推理时应用 EMA 权重 (验证选择最佳模型时使用的就是 EMA 权重)
+    # best_model.pth 已在保存时内置了 EMA 权重（_save_checkpoint 的设计保证）。
+    # 此处保留 apply_shadow 仅为兼容修复前生成的旧 checkpoint（旧版存的是训练权重）。
+    # 对新 checkpoint：apply_shadow 是幂等操作（model 已是 EMA shadow，backup = EMA shadow）。
     if trainer.ema is not None:
         trainer.ema.apply_shadow(model)
         print("  已应用 EMA 权重")

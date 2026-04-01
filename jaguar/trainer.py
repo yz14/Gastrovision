@@ -322,112 +322,117 @@ class ReIDTrainer:
             self.ema.apply_shadow(model)
 
         model.eval()
+        try:
 
-        all_embeddings = []
-        all_labels = []
+            all_embeddings = []
+            all_labels = []
 
-        for images, labels in loader:
-            images = images.to(self.device)
-            embeddings = model.extract_embedding(images)
-            all_embeddings.append(embeddings.cpu())
-            all_labels.append(labels)
+            for images, labels in loader:
+                images = images.to(self.device)
+                embeddings = model.extract_embedding(images)
+                all_embeddings.append(embeddings.cpu())
+                all_labels.append(labels)
 
-        all_embeddings = torch.cat(all_embeddings, dim=0)  # (N, D)
-        all_labels = torch.cat(all_labels, dim=0)  # (N,)
+            all_embeddings = torch.cat(all_embeddings, dim=0)  # (N, D)
+            all_labels = torch.cat(all_labels, dim=0)  # (N,)
 
-        # 计算余弦相似度矩阵
-        sim_matrix = torch.mm(all_embeddings, all_embeddings.t())  # (N, N)
+            # 计算余弦相似度矩阵
+            sim_matrix = torch.mm(all_embeddings, all_embeddings.t())  # (N, N)
 
-        # 对角线设为 -inf（排除自身）
-        N = sim_matrix.size(0)
-        sim_matrix.fill_diagonal_(-float('inf'))
+            # 对角线设为 -inf（排除自身）
+            N = sim_matrix.size(0)
+            sim_matrix.fill_diagonal_(-float('inf'))
 
-        # 计算 Rank-1 和 mAP
-        rank1_correct = 0
-        ap_sum = 0.0
-        valid_queries = 0
+            # 计算 Rank-1 和 mAP
+            rank1_correct = 0
+            ap_sum = 0.0
+            valid_queries = 0
 
-        for i in range(N):
-            query_label = all_labels[i].item()
+            for i in range(N):
+                query_label = all_labels[i].item()
 
-            # 其他样本中是否有同类
-            mask_same = (all_labels == query_label)
-            mask_same[i] = False  # 排除自身
-            n_same = mask_same.sum().item()
+                # 其他样本中是否有同类
+                mask_same = (all_labels == query_label)
+                mask_same[i] = False  # 排除自身
+                n_same = mask_same.sum().item()
 
-            if n_same == 0:
-                continue  # 这个类在验证集中只有 1 个样本
+                if n_same == 0:
+                    continue  # 这个类在验证集中只有1个样本
 
-            valid_queries += 1
+                valid_queries += 1
 
-            # 按相似度降序排列
-            sorted_indices = sim_matrix[i].argsort(descending=True)
-            sorted_match = mask_same[sorted_indices].float()
+                # 按相似度降序排列
+                sorted_indices = sim_matrix[i].argsort(descending=True)
+                sorted_match = mask_same[sorted_indices].float()
 
-            # Rank-1
-            if sorted_match[0] == 1.0:
-                rank1_correct += 1
+                # Rank-1
+                if sorted_match[0] == 1.0:
+                    rank1_correct += 1
 
-            # AP (Average Precision)
-            cum_correct = sorted_match.cumsum(0)
-            precision_at_k = cum_correct / torch.arange(1, N + 1, dtype=torch.float32)
-            ap = (precision_at_k * sorted_match).sum().item() / n_same
-            ap_sum += ap
+                # AP (Average Precision)
+                cum_correct = sorted_match.cumsum(0)
+                precision_at_k = cum_correct / torch.arange(1, N + 1, dtype=torch.float32)
+                ap = (precision_at_k * sorted_match).sum().item() / n_same
+                ap_sum += ap
 
-        rank1 = rank1_correct / max(valid_queries, 1)
-        mAP = ap_sum / max(valid_queries, 1)
+            rank1 = rank1_correct / max(valid_queries, 1)
+            mAP = ap_sum / max(valid_queries, 1)
 
-        # ---- Pair-wise AUC (更贴近 Kaggle 评估) ----
-        # 取上三角所有 pair 的相似度和标签
-        triu_indices = torch.triu_indices(N, N, offset=1)
-        pair_sims = sim_matrix[triu_indices[0], triu_indices[1]]
-        pair_labels = (all_labels[triu_indices[0]] == all_labels[triu_indices[1]]).float()
-        # 过滤掉 -inf (对角线已被恢复为有限值前的上三角不含对角线，无需过滤)
-        n_pos = pair_labels.sum().item()
-        n_neg = len(pair_labels) - n_pos
-        if n_pos > 0 and n_neg > 0:
-            # 手动计算 AUC: P(score_pos > score_neg)
-            sorted_idx = pair_sims.argsort(descending=True)
-            sorted_labels = pair_labels[sorted_idx]
-            # 累积正样本数
-            cum_pos = sorted_labels.cumsum(0)
-            # 每个负样本位置，前面有多少正样本
-            neg_mask = (sorted_labels == 0)
-            auc = cum_pos[neg_mask].sum().item() / (n_pos * n_neg)
-        else:
-            auc = 0.0
+            # ---- Pair-wise AUC (更贴近 Kaggle 评估) ----
+            triu_indices = torch.triu_indices(N, N, offset=1)
+            pair_sims = sim_matrix[triu_indices[0], triu_indices[1]]
+            pair_labels = (all_labels[triu_indices[0]] == all_labels[triu_indices[1]]).float()
+            n_pos = pair_labels.sum().item()
+            n_neg = len(pair_labels) - n_pos
+            if n_pos > 0 and n_neg > 0:
+                sorted_idx = pair_sims.argsort(descending=True)
+                sorted_labels = pair_labels[sorted_idx]
+                cum_pos = sorted_labels.cumsum(0)
+                neg_mask = (sorted_labels == 0)
+                auc = cum_pos[neg_mask].sum().item() / (n_pos * n_neg)
+            else:
+                auc = 0.0
 
-        # [DEBUG] Embedding 诊断 (每 10 epoch 或前 3 epoch 输出)
-        epoch_num = getattr(self, '_current_debug_epoch', 0)
-        if epoch_num < 3 or (epoch_num + 1) % 10 == 0:
-            # 相似度分布统计 (排除对角线 -inf)
-            valid_sims = sim_matrix[sim_matrix > -float('inf')]
-            if len(valid_sims) > 0:
-                # 同类/异类相似度分离度
-                pos_sims = pair_sims[pair_labels == 1]
-                neg_sims = pair_sims[pair_labels == 0]
-                pos_mean = pos_sims.mean().item() if len(pos_sims) > 0 else 0
-                neg_mean = neg_sims.mean().item() if len(neg_sims) > 0 else 0
-                gap = pos_mean - neg_mean
-                print(f"  [DEBUG] Embedding: "
-                      f"sim_all=[{valid_sims.min().item():.3f}, {valid_sims.mean().item():.3f}, {valid_sims.max().item():.3f}] "
-                      f"pos_sim={pos_mean:.3f} neg_sim={neg_mean:.3f} gap={gap:.3f} "
-                      f"emb_norm={all_embeddings.norm(dim=1).mean().item():.3f}")
+            # [DEBUG] Embedding 诊断 (每 10 epoch 或前 3 epoch 输出)
+            epoch_num = getattr(self, '_current_debug_epoch', 0)
+            if epoch_num < 3 or (epoch_num + 1) % 10 == 0:
+                valid_sims = sim_matrix[sim_matrix > -float('inf')]
+                if len(valid_sims) > 0:
+                    pos_sims = pair_sims[pair_labels == 1]
+                    neg_sims = pair_sims[pair_labels == 0]
+                    pos_mean = pos_sims.mean().item() if len(pos_sims) > 0 else 0
+                    neg_mean = neg_sims.mean().item() if len(neg_sims) > 0 else 0
+                    gap = pos_mean - neg_mean
+                    print(f"  [DEBUG] Embedding: "
+                          f"sim_all=[{valid_sims.min().item():.3f}, {valid_sims.mean().item():.3f}, {valid_sims.max().item():.3f}] "
+                          f"pos_sim={pos_mean:.3f} neg_sim={neg_mean:.3f} gap={gap:.3f} "
+                          f"emb_norm={all_embeddings.norm(dim=1).mean().item():.3f}")
 
-        if self.ema is not None:
-            self.ema.restore(model)
-
-        return {
-            'rank1': rank1, 'mAP': mAP, 'auc': auc,
-            'valid_queries': valid_queries, 'total': N,
-        }
+            return {
+                'rank1': rank1, 'mAP': mAP, 'auc': auc,
+                'valid_queries': valid_queries, 'total': N,
+            }
+        finally:
+            # 无论是否抛出异常，必须还原 EMA shadow 到训练权重
+            if self.ema is not None:
+                self.ema.restore(model)
 
     def _save_checkpoint(self, epoch: int, filename: str, metrics: dict = None):
-        """保存 checkpoint"""
+        """保存 checkpoint
+
+        设计原则：_validate 用 EMA shadow 权重评估 val_mAP，因此 checkpoint
+        保存的模型权重应与评估一致——即 EMA shadow 权重。
+        保存前临时 apply EMA shadow，保存后立即 restore 训练权重。
+        """
         path = self.output_dir / filename
+
+        # 保存前临时切换到 EMA shadow 权重（与 _validate 评估时一致）
+        if self.ema is not None:
+            self.ema.apply_shadow(self.model)
+
         state = {
             'epoch': epoch,
-            'model_state_dict': self.model.state_dict(),
+            'model_state_dict': self.model.state_dict(),  # EMA 平滑权重
             'criterion_state_dict': self.criterion.state_dict(),
             'loss_type': self.loss_type,
             'optimizer_state_dict': self.optimizer.state_dict(),
@@ -446,8 +451,21 @@ class ReIDTrainer:
             state['metrics'] = metrics
         torch.save(state, path)
 
-    def load_checkpoint(self, checkpoint_path: str):
-        """加载 checkpoint"""
+        # 立即还原训练权重，不影响后续训练
+        if self.ema is not None:
+            self.ema.restore(self.model)
+
+    def load_checkpoint(self, checkpoint_path: str, reset_best_metric: bool = False):
+        """
+        加载 checkpoint（支持跨架构恢复）
+
+        Args:
+            checkpoint_path: checkpoint 文件路径
+            reset_best_metric: 两阶段训练时设为 True。
+                Phase1 保存的 best_metric 很高，如果 Phase2 继承会导致
+                Phase2 一直达不到 best 而不保存模型。
+                设 True 可从 0 重新计起，确保 Phase2 能正常保存最佳模型。
+        """
         path = Path(checkpoint_path)
         if not path.exists():
             # 尝试在 output_dir 中查找
@@ -459,9 +477,38 @@ class ReIDTrainer:
         print(f"  加载 checkpoint: {path}")
         state = torch.load(path, map_location=self.device, weights_only=False)
 
-        self.model.load_state_dict(state['model_state_dict'])
+        # ---- 模型权重加载 ----
+        ckpt_state_dict = state['model_state_dict']
+        arch_mismatch = False
 
-        # 加载主损失状态 (兼容新旧格式)
+        try:
+            self.model.load_state_dict(ckpt_state_dict)
+            print(f"  ✓ 模型权重完全加载")
+        except RuntimeError:
+            # 架构不匹配 → 回退为部分加载（过滤不兼容键）
+            arch_mismatch = True
+            model_dict = self.model.state_dict()
+            filtered = {}
+            skipped = []
+            for k, v in ckpt_state_dict.items():
+                if k not in model_dict:
+                    continue
+                if v.shape != model_dict[k].shape:
+                    skipped.append(f"{k}: ckpt={list(v.shape)} vs model={list(model_dict[k].shape)}")
+                    continue
+                filtered[k] = v
+
+            missing, _ = self.model.load_state_dict(filtered, strict=False)
+            print(f"  [警告] 检测到架构不匹配，已回退为部分加载")
+            print(f"  [统计] 加载: {len(filtered)}/{len(model_dict)} 个参数")
+            if skipped:
+                print(f"  [跳过] 尺寸不匹配 ({len(skipped)} 个):")
+                for s in skipped[:5]:
+                    print(f"         {s}")
+                if len(skipped) > 5:
+                    print(f"         ... 及另外 {len(skipped) - 5} 个")
+
+        # ---- 损失函数状态 ----
         criterion_key = 'criterion_state_dict'
         if criterion_key not in state:
             criterion_key = 'arcface_state_dict'  # 向后兼容
@@ -471,22 +518,60 @@ class ReIDTrainer:
             except RuntimeError as e:
                 print(f"  [警告] 主损失状态加载失败 (可能损失类型不匹配): {e}")
 
-        # 加载辅助损失状态
+        # 辅助损失状态
         if self.aux_criterion is not None and 'aux_criterion_state_dict' in state:
             try:
                 self.aux_criterion.load_state_dict(state['aux_criterion_state_dict'])
             except RuntimeError as e:
                 print(f"  [警告] 辅助损失状态加载失败: {e}")
 
-        if 'optimizer_state_dict' in state:
-            self.optimizer.load_state_dict(state['optimizer_state_dict'])
-        if self.scheduler is not None and 'scheduler_state_dict' in state:
-            self.scheduler.load_state_dict(state['scheduler_state_dict'])
-        if self.ema is not None and 'ema_state_dict' in state:
-            self.ema.load_state_dict(state['ema_state_dict'])
+        # ---- 优化器/调度器/EMA 状态 ----
+        # 架构不匹配时跳过这些（参数组结构已变，强行加载会报错）
+        if arch_mismatch:
+            print(f"  [提示] 架构不匹配，跳过 optimizer/scheduler/EMA 状态")
+            print(f"  [提示] 训练将从 Epoch 0 开始（使用 checkpoint 中兼容的权重作为初始化）")
+        else:
+            if 'optimizer_state_dict' in state:
+                ckpt_groups = len(state['optimizer_state_dict'].get('param_groups', []))
+                cur_groups = len(self.optimizer.param_groups)
+                if ckpt_groups != cur_groups:
+                    # 参数组数量不匹配：最常见原因是 freeze_backbone 开关状态改变
+                    # (freeze=True 保存 1 组，解冻后变 2 组，或反之)
+                    # 跳过 optimizer 状态，从当前参数组结构重新开始
+                    print(f"  [跳过] 优化器参数组数量不匹配: "
+                          f"checkpoint={ckpt_groups} 组 vs 当前={cur_groups} 组")
+                    print(f"  [提示] 可能是 freeze_backbone 开关发生了变化，"
+                          f"优化器将从当前配置重新开始（模型权重已正常加载）")
+                else:
+                    try:
+                        self.optimizer.load_state_dict(state['optimizer_state_dict'])
+                    except (RuntimeError, ValueError) as e:
+                        print(f"  [警告] 优化器状态加载失败: {e}")
+            if self.scheduler is not None and 'scheduler_state_dict' in state:
+                self.scheduler.load_state_dict(state['scheduler_state_dict'])
+            if self.ema is not None and 'ema_state_dict' in state:
+                try:
+                    self.ema.load_state_dict(
+                        state['ema_state_dict'],
+                        reset_num_updates=reset_best_metric,  # 两阶段训练时重置步数计数器
+                    )
+                    if reset_best_metric:
+                        print(f"  [两阶段训练] EMA decay 保持为 {self.ema.decay} (未从 checkpoint 覆盖)")
+                    # 补充 shadow 中可能缺失的参数（两阶段训练解冻 backbone 后常见）：
+                    # Phase1 freeze_backbone → shadow 只有 head 参数
+                    # Phase2 unfreeze → backbone 参数 requires_grad=True 但不在 shadow 中
+                    # sync_shadow 用当前模型权重初始化缺失的参数，确保 EMA 追踪全部参数
+                    self.ema.sync_shadow(self.model)
+                except (RuntimeError, KeyError) as e:
+                    print(f"  [警告] EMA 状态加载失败: {e}")
 
-        self.best_metric = state.get('best_metric', 0.0)
-        self.best_epoch = state.get('best_epoch', 0)
-        self.start_epoch = state.get('epoch', 0) + 1
+            self.best_metric = state.get('best_metric', 0.0)
+            self.best_epoch = state.get('best_epoch', 0)
+            self.start_epoch = state.get('epoch', 0) + 1
+            print(f"  恢复自 Epoch {self.start_epoch}, 最佳指标={self.best_metric:.4f}")
 
-        print(f"  恢复自 Epoch {self.start_epoch}, 最佳 Rank-1={self.best_metric:.4f}")
+        if reset_best_metric:
+            self.best_metric = 0.0
+            self.best_epoch = 0
+            print(f"  [两阶段训练] best_metric 已重置为 0，Phase2 将从头选择最佳模型")
+

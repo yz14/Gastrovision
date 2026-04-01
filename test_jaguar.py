@@ -689,6 +689,124 @@ def test_auxiliary_loss():
     print("✓ test_auxiliary_loss PASSED")
 
 
+def test_pretrained_cross_backbone():
+    """测试跨 backbone 加载预训练权重（应不崩溃，忽略不匹配键）"""
+    from jaguar.model import ReIDModel
+    import torchvision.models as models
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # 保存 ResNet18 权重
+        resnet = models.resnet18(weights=None)
+        weight_path = str(Path(tmp) / 'resnet18.pth')
+        torch.save(resnet.state_dict(), weight_path)
+
+        # 用 ResNet18 权重初始化 ConvNeXt — 应不报错
+        model = ReIDModel(
+            backbone_name='convnext_tiny',
+            embedding_dim=512,
+            pretrained=False,
+            pretrained_path=weight_path,
+            use_gem=False,
+        )
+        x = torch.randn(2, 3, 224, 224)
+        emb = model.extract_embedding(x)
+        assert emb.shape == (2, 512), f"embedding 形状错误: {emb.shape}"
+
+        # 用 ResNet18 权重初始化 Swin — 应不报错
+        model2 = ReIDModel(
+            backbone_name='swin_t',
+            embedding_dim=512,
+            pretrained=False,
+            pretrained_path=weight_path,
+            use_gem=False,
+        )
+        emb2 = model2.extract_embedding(x)
+        assert emb2.shape == (2, 512)
+
+    print("✓ test_pretrained_cross_backbone PASSED")
+
+
+def test_pretrained_reid_checkpoint():
+    """测试使用完整 ReIDModel checkpoint 作为 pretrained_path（含 embedding.weight 等额外键）"""
+    from jaguar.model import ReIDModel
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # 用 ResNet18 训练并保存完整的 model_state_dict（模拟 Trainer checkpoint）
+        model_r18 = ReIDModel(
+            backbone_name='resnet18', embedding_dim=256,
+            pretrained=False, use_gem=False,
+        )
+        ckpt = {'model_state_dict': model_r18.state_dict()}
+        ckpt_path = str(Path(tmp) / 'reid_r18_ckpt.pth')
+        torch.save(ckpt, ckpt_path)
+
+        # 用此 checkpoint 初始化 ConvNeXt backbone — 应不报错
+        # （embedding.weight 形状 [256, 512] vs ConvNeXt 维度，会被过滤掉）
+        model_cnx = ReIDModel(
+            backbone_name='convnext_tiny', embedding_dim=512,
+            pretrained=False, pretrained_path=ckpt_path,
+            use_gem=False,
+        )
+        x = torch.randn(2, 3, 224, 224)
+        emb = model_cnx.extract_embedding(x)
+        assert emb.shape == (2, 512)
+
+        # 同样测试 Swin
+        model_swin = ReIDModel(
+            backbone_name='swin_t', embedding_dim=512,
+            pretrained=False, pretrained_path=ckpt_path,
+            use_gem=False,
+        )
+        emb2 = model_swin.extract_embedding(x)
+        assert emb2.shape == (2, 512)
+
+    print("✓ test_pretrained_reid_checkpoint PASSED")
+
+
+def test_pretrained_prefixed_keys():
+    """测试带 backbone. 前缀的 state_dict 能被自动去前缀并加载"""
+    from jaguar.model import ReIDModel
+    import torchvision.models as models
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # 保存带 'backbone.' 前缀的 ResNet18 权重
+        resnet = models.resnet18(weights=None)
+        prefixed_sd = {f'backbone.{k}': v for k, v in resnet.state_dict().items()}
+        weight_path = str(Path(tmp) / 'prefixed_r18.pth')
+        torch.save(prefixed_sd, weight_path)
+
+        # 应能自动去前缀并成功加载
+        model = ReIDModel(
+            backbone_name='resnet18', embedding_dim=128,
+            pretrained=False, pretrained_path=weight_path,
+            use_gem=False,
+        )
+
+        # 验证权重确实被加载了（与原始权重一致）
+        original_sd = resnet.state_dict()
+        for name, param in model.backbone.named_parameters():
+            if name in original_sd:
+                assert torch.equal(param.data, original_sd[name]), \
+                    f"权重不一致: {name}"
+
+        # 同样测试 'model.' 前缀
+        model_prefixed = {f'model.{k}': v for k, v in resnet.state_dict().items()}
+        weight_path2 = str(Path(tmp) / 'model_prefix_r18.pth')
+        torch.save(model_prefixed, weight_path2)
+
+        model2 = ReIDModel(
+            backbone_name='resnet18', embedding_dim=128,
+            pretrained=False, pretrained_path=weight_path2,
+            use_gem=False,
+        )
+        for name, param in model2.backbone.named_parameters():
+            if name in original_sd:
+                assert torch.equal(param.data, original_sd[name]), \
+                    f"权重不一致 (model. prefix): {name}"
+
+    print("✓ test_pretrained_prefixed_keys PASSED")
+
+
 # ================================================================
 # 运行所有测试
 # ================================================================
@@ -714,6 +832,9 @@ if __name__ == '__main__':
         test_efficientnet_no_double_dropout,
         test_loss_types,
         test_auxiliary_loss,
+        test_pretrained_cross_backbone,
+        test_pretrained_reid_checkpoint,
+        test_pretrained_prefixed_keys,
     ]
 
     passed = 0

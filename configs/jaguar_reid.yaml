@@ -30,9 +30,16 @@ embedding_dim: 512         # 嵌入维度
 pretrained: true           # ImageNet 预训练
 pretrained_path: "/data0/data/resnet50.pth"        # 本地预训练权重路径 (为空则使用 torchvision 默认下载)
                            # 示例: "/data0/yzhen/pretrained/convnext_base_1k_224_ema.pth"
+freeze_backbone: false     # 是否冻结 Backbone (true=仅训练 Head; false=全量训练)
+                           # 两阶段训练示例:
+                           #   Phase1: freeze_backbone=true, epochs=30, output_dir=phase1/
+                           #   Phase2: freeze_backbone=false, epochs=120, resume=phase1/best_model.pth
+                           #           reset_best_metric=true, reset_scheduler=true
 use_gem: true              # GeM Pooling (优于 AvgPool)
 gem_p: 3.0                 # GeM 初始 p 值
-dropout: 0.2               # embedding FC 前的 dropout (Re-ID 小数据集推荐 0.2~0.3)
+dropout: 0.2               # embedding head 的 dropout
+use_mlp_head: true         # MLP Embedding Head (Linear→BN→ReLU→Linear)
+                           # 比单层 Linear 强，小数据集推荐 true
 
 # ---- 损失函数 ----
 # 主损失类型:
@@ -98,3 +105,8 @@ use_flip_tta: true         # 推理时使用水平翻转 TTA
 # ---- 运行模式 ----
 test_only: false           # 只推理 (需配合 resume)
 resume: ""                 # 从 checkpoint 恢复
+
+# ---- 两阶段训练选项 (配合 resume 使用) ----
+# Phase2 加载 Phase1 checkpoint 时使用这两个选项
+reset_best_metric: false   # Phase2 重置 best_metric (true=避免 Phase2 无法保存最佳模型)
+reset_scheduler: false     # Phase2 重建 scheduler (true=避免从 Phase1 的极低 LR 开始)

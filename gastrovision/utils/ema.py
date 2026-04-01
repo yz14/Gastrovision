@@ -117,8 +117,41 @@ class ModelEMA:
             'decay': self.decay,
         }
 
-    def load_state_dict(self, state: dict):
-        """加载 EMA 状态"""
+    def sync_shadow(self, model: nn.Module):
+        """
+        将模型中 shadow 里缺失的参数补充进来（以当前模型权重为初始值）。
+
+        使用场景：两阶段训练。
+          Phase1: freeze_backbone=True → EMA 只追踪 head 参数（backbone requires_grad=False）
+          Phase2: 解冻 backbone 后调用此方法 → backbone 参数加入 shadow 并以当前权重初始化
+
+        效果：Phase2 开始时 backbone shadow = Phase1 最终 backbone 权重（未平滑），
+              随后 Phase2 训练中 EMA 会逐步对 backbone 做指数平均。
+
+        Args:
+            model: 当前模型（已解冻 backbone）
+        """
+        added = 0
+        for name, param in model.named_parameters():
+            if param.requires_grad and name not in self.shadow:
+                self.shadow[name] = param.data.clone()
+                added += 1
+        if added > 0:
+            print(f"  [EMA] 补充 {added} 个参数到 shadow（解冻的 backbone 参数）")
+
+    def load_state_dict(self, state: dict, reset_num_updates: bool = False):
+        """
+        加载 EMA 状态
+
+        Args:
+            state: 由 state_dict() 返回的状态字典
+            reset_num_updates: 两阶段训练时设为 True，重置步数计数器（从 0 开始暖机）
+                               默认 False = 继续从 Phase1 的步数计数（续训）
+        Note:
+            decay 不从 checkpoint 恢复。decay 是构造时传入的超参数，
+            不同阶段可能使用不同 decay，覆盖会导致 Phase2 沿用 Phase1 的错误 decay。
+        """
         self.shadow = state['shadow']
-        self.num_updates = state['num_updates']
-        self.decay = state.get('decay', self.decay)
+        if not reset_num_updates:
+            self.num_updates = state['num_updates']
+        # decay 故意不恢复：保留当前实例的配置值
